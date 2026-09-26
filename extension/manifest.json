@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "UDM - Send to Download Manager",
+  "version": "1.1.0",
+  "description": "Send downloads to UDM automatically or via right-click context menu",
+  "permissions": [
+    "contextMenus",
+    "activeTab",
+    "downloads",
+    "cookies",
+    "storage",
+    "webRequest"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "css": ["content.css"],
+      "js": ["content.js"]
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "UDM Download Manager"
+  }
+}
