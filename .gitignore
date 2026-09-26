@@ -69,7 +69,7 @@ venv.bak/
 .DS_Store
 
 # UDM Specific Files
-*.zip
+
 *.db
 *.sqlite
 *.sqlite3
