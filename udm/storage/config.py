@@ -4,6 +4,7 @@ App configuration and settings persistence.
 
 import json
 import logging
+import secrets
 from pathlib import Path
 from typing import Any, Optional
 
@@ -48,6 +49,11 @@ DEFAULT_CONFIG = {
         "ws_port": 19615,
         "clipboard_monitor": True,
     },
+    "security": {
+        # Shared secret the browser extension must send with every request.
+        # Generated on first run — see Settings → General to view/copy it.
+        "pairing_token": "",
+    },
     "categories": {
         "Compressed": str(Path.home() / "Downloads" / "Compressed"),
         "Documents": str(Path.home() / "Downloads" / "Documents"),
@@ -73,7 +79,7 @@ class Config:
     def load(self):
         """Load config from file, merging with defaults."""
         self._data = self._deep_copy(DEFAULT_CONFIG)
-        
+
         if Path(self.config_path).exists():
             try:
                 with open(self.config_path, "r", encoding="utf-8") as f:
@@ -82,6 +88,14 @@ class Config:
                 logger.info(f"Config loaded from {self.config_path}")
             except Exception as e:
                 logger.warning(f"Failed to load config: {e}, using defaults")
+
+        # Ensure a pairing token exists so the browser extension can
+        # authenticate to the WebSocket bridge. Without this, any local
+        # webpage could open ws://localhost:<port> itself and trigger
+        # downloads — the token is the only thing that stops that.
+        if not self._data.get("security", {}).get("pairing_token"):
+            self._data.setdefault("security", {})["pairing_token"] = secrets.token_urlsafe(24)
+            self.save()
 
     def save(self):
         """Save current config to file."""
@@ -117,6 +131,12 @@ class Config:
             data = data[k]
         data[keys[-1]] = value
         self.save()
+
+    def regenerate_pairing_token(self) -> str:
+        """Generate a brand-new pairing token (invalidates the old one)."""
+        token = secrets.token_urlsafe(24)
+        self.set("security.pairing_token", token)
+        return token
 
     @property
     def data(self) -> dict:

@@ -1,44 +1,28 @@
 """
 Custom segmented progress bar widget.
 Shows individual segment progress like IDM's detailed view.
-Color coded: green (done), blue (active), gray (pending), red (error).
+Styled for Fluent Light theme.
 """
 
 from PyQt6.QtWidgets import QWidget
 from PyQt6.QtCore import Qt, QRectF
-from PyQt6.QtGui import QPainter, QColor, QLinearGradient, QFont, QPen, QBrush
+from PyQt6.QtGui import QPainter, QColor, QPainterPath, QFont, QPen, QBrush
 
 from udm.core.segment import Segment, SegmentStatus, DownloadTask
 
-
-# Segment status colors
+# Fluent Design Colors
 STATUS_COLORS = {
-    SegmentStatus.DONE: {
-        "start": QColor(76, 175, 80),    # Green
-        "end": QColor(56, 142, 60),
-    },
-    SegmentStatus.ACTIVE: {
-        "start": QColor(66, 165, 245),   # Blue
-        "end": QColor(30, 136, 229),
-    },
-    SegmentStatus.PENDING: {
-        "start": QColor(189, 189, 189),  # Gray
-        "end": QColor(158, 158, 158),
-    },
-    SegmentStatus.PAUSED: {
-        "start": QColor(255, 183, 77),   # Orange
-        "end": QColor(255, 152, 0),
-    },
-    SegmentStatus.ERROR: {
-        "start": QColor(239, 83, 80),    # Red
-        "end": QColor(229, 57, 53),
-    },
+    SegmentStatus.DONE: QColor(0, 120, 212),       # Fluent Blue (Completed)
+    SegmentStatus.ACTIVE: QColor(100, 180, 250),   # Light Blue (Downloading)
+    SegmentStatus.PENDING: QColor(220, 220, 220),  # Light Gray
+    SegmentStatus.PAUSED: QColor(255, 170, 0),     # Orange
+    SegmentStatus.ERROR: QColor(232, 17, 35),      # Fluent Red
 }
 
-BACKGROUND_COLOR = QColor(224, 224, 224, 80)
-BORDER_COLOR = QColor(187, 222, 251, 150)
-TEXT_COLOR = QColor(255, 255, 255)
-SEPARATOR_COLOR = QColor(255, 255, 255, 100)
+BACKGROUND_COLOR = QColor(0, 0, 0, 15)
+BORDER_COLOR = QColor(0, 0, 0, 20)
+TEXT_COLOR_DARK = QColor(26, 26, 26)
+TEXT_COLOR_LIGHT = QColor(255, 255, 255)
 
 
 class SegmentedProgressBar(QWidget):
@@ -52,7 +36,6 @@ class SegmentedProgressBar(QWidget):
         self._task: DownloadTask = None
         self._show_text = True
         self._show_segments = True
-        self._animation_offset = 0
         self.setMinimumHeight(24)
         self.setMaximumHeight(28)
 
@@ -74,7 +57,7 @@ class SegmentedProgressBar(QWidget):
         rect = QRectF(0, 0, w, h)
         radius = h / 2
 
-        # Background
+        # Draw Background
         painter.setPen(QPen(BORDER_COLOR, 1))
         painter.setBrush(QBrush(BACKGROUND_COLOR))
         painter.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
@@ -82,8 +65,8 @@ class SegmentedProgressBar(QWidget):
         if not self._task or not self._task.segments:
             # Draw empty state
             if self._show_text:
-                painter.setPen(QColor(120, 144, 156))
-                painter.setFont(QFont("Segoe UI", 9, QFont.Weight.DemiBold))
+                painter.setPen(TEXT_COLOR_DARK)
+                painter.setFont(QFont("Segoe UI Variable", 9, QFont.Weight.DemiBold))
                 painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "0%")
             painter.end()
             return
@@ -93,88 +76,57 @@ class SegmentedProgressBar(QWidget):
         total = task.total_size if task.total_size > 0 else 1
         overall_progress = min(task.downloaded_size / total, 1.0)
 
+        # Create clipping path for perfectly rounded segments
+        clip_path = QPainterPath()
+        clip_path.addRoundedRect(rect.adjusted(1, 1, -1, -1), radius - 0.5, radius - 0.5)
+        painter.setClipPath(clip_path)
+
         if self._show_segments and len(task.segments) > 1:
-            self._draw_segmented(painter, rect, radius)
+            self._draw_segmented(painter, rect)
         else:
-            self._draw_simple(painter, rect, radius, overall_progress)
+            self._draw_simple(painter, rect, overall_progress)
+
+        # Remove clipping for text
+        painter.setClipping(False)
 
         # Draw percentage text
         if self._show_text:
             pct = overall_progress * 100
             text = f"{pct:.1f}%"
-            painter.setPen(Qt.PenStyle.NoPen)
-
-            # Shadow behind text
-            painter.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
-            shadow_rect = rect.adjusted(1, 1, 1, 1)
-            painter.setPen(QColor(0, 0, 0, 80))
-            painter.drawText(shadow_rect, Qt.AlignmentFlag.AlignCenter, text)
-
-            # Actual text
-            painter.setPen(TEXT_COLOR if overall_progress > 0.5 else QColor(26, 58, 92))
+            painter.setFont(QFont("Segoe UI Variable", 9, QFont.Weight.DemiBold))
+            
+            # Text color depends on progress (white if mostly filled, dark if mostly empty)
+            painter.setPen(TEXT_COLOR_LIGHT if overall_progress > 0.55 else TEXT_COLOR_DARK)
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
 
         painter.end()
 
-    def _draw_segmented(self, painter: QPainter, rect: QRectF, radius: float):
+    def _draw_segmented(self, painter: QPainter, rect: QRectF):
         """Draw individual segment blocks."""
         task = self._task
         total_bytes = task.total_size if task.total_size > 0 else 1
-        w = rect.width() - 2  # account for border
+        w = rect.width() - 2
         h = rect.height() - 2
         x_offset = 1
 
-        for i, seg in enumerate(task.segments):
+        for seg in sorted(task.segments, key=lambda s: s.start_byte):
             seg_width = (seg.total_bytes / total_bytes) * w
-            if seg_width < 1:
+            if seg_width < 0.5:
                 continue
 
-            # Calculate segment fill based on its own progress
             fill_ratio = seg.downloaded_bytes / seg.total_bytes if seg.total_bytes > 0 else 0
             fill_width = seg_width * fill_ratio
 
             if fill_width > 0:
-                colors = STATUS_COLORS.get(seg.status, STATUS_COLORS[SegmentStatus.PENDING])
-                gradient = QLinearGradient(x_offset, 0, x_offset, h)
-                gradient.setColorAt(0, colors["start"])
-                gradient.setColorAt(1, colors["end"])
-
+                color = STATUS_COLORS.get(seg.status, STATUS_COLORS[SegmentStatus.PENDING])
                 painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(QBrush(gradient))
-
-                # Clip to the overall rounded rect
+                painter.setBrush(QBrush(color))
                 fill_rect = QRectF(x_offset, 1, fill_width, h)
-
-                # Handle rounded corners for first and last segment
-                if i == 0 and i == len(task.segments) - 1:
-                    painter.drawRoundedRect(fill_rect, radius, radius)
-                elif i == 0:
-                    painter.drawRoundedRect(
-                        QRectF(fill_rect.x(), fill_rect.y(),
-                               fill_rect.width() + radius, fill_rect.height()),
-                        radius, radius
-                    )
-                    if fill_width < seg_width:
-                        painter.drawRect(
-                            QRectF(fill_rect.x() + radius, fill_rect.y(),
-                                   fill_rect.width() - radius, fill_rect.height())
-                        )
-                elif i == len(task.segments) - 1 and fill_ratio >= 0.95:
-                    painter.drawRoundedRect(fill_rect, radius, radius)
-                else:
-                    painter.drawRect(fill_rect)
-
-            # Draw segment separator
-            if i > 0:
-                painter.setPen(QPen(SEPARATOR_COLOR, 1))
-                painter.drawLine(
-                    int(x_offset), 2,
-                    int(x_offset), int(h)
-                )
+                painter.drawRect(fill_rect)
 
             x_offset += seg_width
 
-    def _draw_simple(self, painter: QPainter, rect: QRectF, radius: float, progress: float):
+    def _draw_simple(self, painter: QPainter, rect: QRectF, progress: float):
         """Draw a simple single-bar progress."""
         if progress <= 0:
             return
@@ -183,14 +135,6 @@ class SegmentedProgressBar(QWidget):
         h = rect.height() - 2
         fill_width = w * progress
 
-        gradient = QLinearGradient(0, 0, fill_width, 0)
-        gradient.setColorAt(0, QColor(66, 165, 245))
-        gradient.setColorAt(0.5, QColor(41, 182, 246))
-        gradient.setColorAt(1, QColor(38, 198, 218))
-
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QBrush(gradient))
-        painter.drawRoundedRect(
-            QRectF(1, 1, fill_width, h),
-            radius, radius
-        )
+        painter.setBrush(QBrush(STATUS_COLORS[SegmentStatus.ACTIVE]))
+        painter.drawRect(QRectF(1, 1, fill_width, h))

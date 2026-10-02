@@ -66,7 +66,15 @@
       background: #ef5350;
     }
 
-    .url-input {
+    label {
+      display: block;
+      font-size: 11px;
+      font-weight: 600;
+      color: #546e7a;
+      margin: 10px 0 4px;
+    }
+
+    .url-input, .token-input {
       width: 100%;
       padding: 10px 14px;
       border: 2px solid #bbdefb;
@@ -76,8 +84,17 @@
       transition: border-color 0.2s;
     }
 
-    .url-input:focus {
+    .url-input:focus, .token-input:focus {
       border-color: #42a5f5;
+    }
+
+    .token-row {
+      display: flex;
+      gap: 6px;
+    }
+
+    .token-row .token-input {
+      flex: 1;
     }
 
     .btn {
@@ -103,6 +120,20 @@
       transform: translateY(0);
     }
 
+    .btn-small {
+      width: auto;
+      padding: 10px 14px;
+      margin-top: 0;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .hint {
+      font-size: 10px;
+      color: #78909c;
+      margin-top: 4px;
+    }
+
     .footer {
       padding: 10px 20px;
       text-align: center;
@@ -126,6 +157,26 @@
       <span id="statusText">Checking...</span>
     </div>
 
+    <label for="tokenInput">Pairing Token (from UDM → Settings → General)</label>
+    <div class="token-row">
+      <input type="text" class="token-input" id="tokenInput" placeholder="Paste token here..." />
+      <button class="btn btn-small" id="saveTokenBtn">Save</button>
+    </div>
+    <div class="hint">Required once — UDM won't accept requests without it.</div>
+
+    <label style="display:flex;align-items:center;gap:8px;margin-top:14px;cursor:pointer;">
+      <input type="checkbox" id="autoConfirmCheck" style="width:16px;height:16px;margin:0;" />
+      <span style="font-size:12px;font-weight:600;color:#37474f;">Skip confirm dialog (send instantly)</span>
+    </label>
+    <div class="hint">Faster takeover for downloads Chrome starts itself — recommended if you also turn off "Ask where to save each file" in Chrome's own settings.</div>
+
+    <label style="display:flex;align-items:center;gap:8px;margin-top:10px;cursor:pointer;">
+      <input type="checkbox" id="hideNativeUiCheck" style="width:16px;height:16px;margin:0;" />
+      <span style="font-size:12px;font-weight:600;color:#37474f;">Hide Chrome's download popup</span>
+    </label>
+    <div class="hint">Stops Chrome's own download bubble flashing when UDM takes over. It reappears automatically for any download Chrome handles itself.</div>
+
+    <label for="urlInput">Manual download</label>
     <input
       type="text"
       class="url-input"

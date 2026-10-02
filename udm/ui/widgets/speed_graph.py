@@ -7,7 +7,7 @@ import time
 
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QLinearGradient, QBrush, QColor
 
 try:
     import pyqtgraph as pg
@@ -46,26 +46,32 @@ class SpeedGraph(QWidget):
         pg.setConfigOptions(antialias=True)
 
         self._plot = pg.PlotWidget()
-        self._plot.setBackground("#f0f8ff")
-        self._plot.setLabel("left", "Speed", units="KB/s")
-        self._plot.setLabel("bottom", "Time", units="s")
-        self._plot.showGrid(x=True, y=True, alpha=0.3)
-
-        # Style the plot
-        self._plot.getAxis("left").setPen(pg.mkPen(color="#1565c0", width=1))
-        self._plot.getAxis("bottom").setPen(pg.mkPen(color="#1565c0", width=1))
-        self._plot.getAxis("left").setTextPen(pg.mkPen(color="#1565c0"))
-        self._plot.getAxis("bottom").setTextPen(pg.mkPen(color="#1565c0"))
+        self._plot.setBackground("transparent")  # Fluent background
+        self._plot.setMouseEnabled(x=False, y=False)
+        self._plot.setMenuEnabled(False)
+        self._plot.hideButtons()
+        
+        # Minimalist sparkline style
+        self._plot.getAxis("bottom").hide()
+        self._plot.getAxis("left").setPen(pg.mkPen(color=QColor(0,0,0,0)))
+        self._plot.getAxis("left").setTextPen(pg.mkPen(color=QColor(150, 150, 150)))
+        self._plot.showGrid(x=False, y=True, alpha=0.1)
 
         # Create the line
-        pen = pg.mkPen(color="#42a5f5", width=2)
+        pen = pg.mkPen(color="#0078d4", width=3)  # Fluent Blue
         self._curve = self._plot.plot(pen=pen)
 
-        # Fill under curve
+        # Fill under curve with gradient
+        gradient = QLinearGradient(0, 0, 0, 1)
+        gradient.setCoordinateMode(QLinearGradient.CoordinateMode.ObjectMode)
+        gradient.setColorAt(0, QColor(0, 120, 212, 80))
+        gradient.setColorAt(1, QColor(0, 120, 212, 0))
+
         self._fill = pg.FillBetweenItem(
             self._curve,
             pg.PlotDataItem([0], [0]),
-            brush=pg.mkBrush(66, 165, 245, 50),
+            brush=QBrush(gradient),
+            pen=None
         )
         self._plot.addItem(self._fill)
 

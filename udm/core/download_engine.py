@@ -12,6 +12,7 @@ Implements IDM-style dynamic file segmentation:
 import asyncio
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import Optional, Callable, Dict
@@ -23,7 +24,7 @@ from udm.core.segment import (
 )
 from udm.core.assembler import Assembler
 from udm.core.speed_limiter import SpeedLimiter
-from udm.network.http_client import HttpClient, RangeNotSupportedError
+from udm.network.http_client import HttpClient, RangeNotSupportedError, PlaceholderContentError
 
 logger = logging.getLogger("udm.core.engine")
 
@@ -34,6 +35,55 @@ MIN_SEGMENT_SIZE = 256 * 1024  # 256 KB minimum per segment
 CHUNK_SIZE = 1048576  # 1 MB read chunks (improves download speed dramatically)
 PROGRESS_UPDATE_INTERVAL = 0.3  # seconds between progress callbacks
 SPEED_CALC_WINDOW = 3.0  # seconds for speed averaging
+
+# Domains known to require a dedicated extractor (yt-dlp) rather than a
+# plain HTTP GET — direct fetches of their "video URL" are usually a
+# manifest, a signed short-lived fragment, or a page that 403s a bare client.
+KNOWN_VIDEO_DOMAINS = re.compile(
+    r"(youtube\.com|youtu\.be|twitter\.com|x\.com|reddit\.com|vimeo\.com|"
+    r"tiktok\.com|instagram\.com|facebook\.com|fb\.watch|dailymotion\.com|"
+    r"twitch\.tv|streamable\.com)"
+)
+
+# A response whose Content-Type is one of these but whose reported size is
+# implausibly small for real video/audio almost certainly isn't the actual
+# media — it's a manifest, a single fragment, or an error page.
+STREAM_LIKE_CONTENT_TYPES = (
+    "video/", "audio/",
+    "application/vnd.apple.mpegurl", "application/x-mpegurl",
+    "application/dash+xml",
+)
+SUSPICIOUSLY_SMALL_FOR_VIDEO = 2 * 1024 * 1024  # 2 MB
+
+# --- Filename safety ---------------------------------------------------------
+# Windows rejects path components over 255 characters, reserved device names,
+# trailing dots/spaces and a handful of punctuation characters. Filenames that
+# come from URLs can break all of those (a signed download link's last path
+# segment can be 1,000+ characters of random token) — which used to make a
+# download run to 100% and then fail at the very last step, the final rename.
+_INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_RESERVED_FILENAMES = {"CON", "PRN", "AUX", "NUL"} | {f"COM{i}" for i in range(1, 10)} | {f"LPT{i}" for i in range(1, 10)}
+MAX_FILENAME_LENGTH = 150
+
+
+def looks_like_junk_filename(name: str) -> bool:
+    """A long run of characters with no spaces is a token, not a real name."""
+    stem = os.path.splitext(name or "")[0]
+    return len(stem) > 80 and " " not in stem
+
+
+def sanitize_filename(name: str, fallback: str = "download") -> str:
+    """Make `name` safe to create on Windows (and everywhere else)."""
+    name = _INVALID_FILENAME_CHARS.sub("_", (name or "").strip()).strip(" .")
+    if not name:
+        return fallback
+    stem, ext = os.path.splitext(name)
+    if len(ext) > 12:  # a "." buried in junk isn't a real extension
+        stem, ext = name, ""
+    if stem.upper() in _RESERVED_FILENAMES:
+        stem = f"_{stem}"
+    stem = stem[: MAX_FILENAME_LENGTH - len(ext)].rstrip(" .")
+    return (stem or fallback) + ext
 
 
 class DownloadEngine:
@@ -53,6 +103,7 @@ class DownloadEngine:
         speed_limiter: Optional[SpeedLimiter] = None,
         temp_dir: Optional[str] = None,
         default_save_dir: Optional[str] = None,
+        category_dirs: Optional[Dict[str, str]] = None,
     ):
         self.speed_limiter = speed_limiter or SpeedLimiter()
         self.temp_dir = temp_dir or str(
@@ -61,6 +112,10 @@ class DownloadEngine:
         self.default_save_dir = default_save_dir or str(
             Path.home() / "Downloads"
         )
+        # {"Compressed": "<folder>", "Video": "<folder>", ...} — normally the
+        # "categories" section of config.json.
+        self.category_dirs: Dict[str, str] = category_dirs or {}
+        logger.info(f"Category folders in use: {self.category_dirs or '(none configured — using defaults)'}")
 
         # Active download tracking
         self._active_tasks: Dict[str, asyncio.Task] = {}
@@ -71,6 +126,58 @@ class DownloadEngine:
 
         # Ensure temp directory exists
         Path(self.temp_dir).mkdir(parents=True, exist_ok=True)
+
+    async def _try_ytdlp_extract(self, url: str):
+        """
+        Attempt to resolve `url` via yt-dlp. Returns the yt-dlp info dict on
+        success, or None if yt-dlp isn't available or extraction fails (e.g.
+        it's genuinely just a plain file, not a video page/stream).
+        """
+        try:
+            import yt_dlp
+        except ImportError:
+            return None
+
+        loop = asyncio.get_event_loop()
+
+        def extract():
+            ydl_opts = {
+                # NOT "best[ext=mp4]/best" — that's a legacy single-combined-
+                # file selector, and modern YouTube mostly doesn't serve one.
+                # Explicitly requesting it can match zero formats (this was
+                # the exact cause of yt-dlp's "Requested format is not
+                # available" from the extension's video path too). Let
+                # yt-dlp use its own current default, same as a bare
+                # `yt-dlp <url>` in a terminal.
+                "format": "bestvideo*+bestaudio/best",
+                "quiet": True,
+                "no_warnings": True,
+                "nocheckcertificate": True,
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                return ydl.extract_info(url, download=False)
+
+        try:
+            return await loop.run_in_executor(None, extract)
+        except Exception as e:
+            logger.info(f"yt-dlp could not extract {url}: {e}")
+            return None
+
+    def resolve_category_dir(self, category) -> str:
+        """
+        IDM-style folder for a file category (Compressed, Video, Music, ...).
+        Uses the folder configured for that category; if none is configured,
+        falls back to <default dir>/<Category>, except General which stays in
+        the default dir itself. The folder is created later, when the file is
+        actually saved, so cancelled downloads don't leave empty folders.
+        """
+        name = getattr(category, "value", str(category))
+        folder = self.category_dirs.get(name)
+        if folder:
+            return str(folder)
+        if name == "General":
+            return self.default_save_dir
+        return str(Path(self.default_save_dir) / name)
 
     async def prepare_download(
         self,
@@ -94,13 +201,86 @@ class DownloadEngine:
         )
 
         try:
-            # Step 1: HEAD request to get file metadata
-            # Auto-derive referrer from URL origin if not provided
-            if not referrer:
-                referrer = client._derive_referrer(url)
+            is_video_site = bool(KNOWN_VIDEO_DOMAINS.search(url))
+            is_hls_stream = ".m3u8" in url.lower() or ".mpd" in url.lower()
 
-            info = await client.get_file_info(url, referrer=referrer)
-            logger.info(f"File info: {info}")
+            skip_probe = False
+            info = {}
+            video_info = None
+
+            if is_video_site or is_hls_stream:
+                logger.info(f"{'HLS stream' if is_hls_stream else 'Video site'} detected, launching yt-dlp to extract stream...")
+                video_info = await self._try_ytdlp_extract(url)
+                if not video_info:
+                    logger.error(
+                        "yt-dlp extraction failed. Falling back to standard UDM HTTP probe."
+                    )
+
+            if not skip_probe and not video_info:
+                # Step 1: HEAD request to get file metadata (or video direct URL metadata)
+                if not referrer:
+                    referrer = client._derive_referrer(url)
+
+                info = await client.get_file_info(url, referrer=referrer)
+                logger.info(f"File info: {info}")
+
+                # If this wasn't recognized as a video site/stream up front,
+                # but the response itself looks like a small piece of a
+                # video/audio stream (a manifest, a single fragment, or a
+                # blocked/placeholder response on a URL that clearly wants
+                # to serve media), give yt-dlp a shot before accepting a
+                # truncated "download". This is what previously let videos
+                # from platforms outside the hardcoded domain list silently
+                # save as a few-KB file.
+                ct = (info.get("content_type") or "").lower().split(";")[0].strip()
+                looks_stream_like = any(ct.startswith(p) or ct == p for p in STREAM_LIKE_CONTENT_TYPES)
+                suspiciously_small = looks_stream_like and info.get("total_size", 0) < SUSPICIOUSLY_SMALL_FOR_VIDEO
+
+                if info.get("likely_placeholder") or suspiciously_small:
+                    logger.info(
+                        "Initial probe looks like a stream fragment/placeholder "
+                        "rather than a full file — trying yt-dlp as a fallback."
+                    )
+                    video_info = await self._try_ytdlp_extract(url)
+
+            if video_info and "url" in video_info:
+                logger.info(f"yt-dlp successfully extracted direct stream: {video_info.get('title')}")
+                url = video_info["url"]  # Replace original URL with direct stream URL
+
+                if not filename:
+                    title = video_info.get("title", "Video")
+                    ext = video_info.get("ext", "mp4")
+                    title = re.sub(r'[\\/*?:"<>|]', "", title)
+                    filename = f"{title}.{ext}"
+
+                import yt_dlp
+                # Use yt-dlp's exact User-Agent, otherwise many CDNs return 403 Forbidden
+                user_agent = video_info.get("http_headers", {}).get(
+                    "User-Agent", yt_dlp.utils.std_headers["User-Agent"]
+                )
+
+                info = {
+                    "total_size": video_info.get("filesize") or video_info.get("filesize_approx") or 0,
+                    "supports_range": True,  # most video CDNs support range
+                    "etag": None,
+                    "last_modified": None,
+                    "content_type": "video/mp4",
+                    "final_url": url,
+                    "redirected": False,
+                    "original_url": url,
+                    "likely_placeholder": False,
+                }
+            elif info.get("likely_placeholder"):
+                # Not a video, and the plain HTTP path is convinced this is a
+                # placeholder/error page rather than the real file. Fail
+                # clearly here instead of creating a task that will "complete"
+                # after downloading a few KB of garbage.
+                raise Exception(
+                    "This link returned an error/placeholder page instead of the "
+                    "real file — it may be expired, require a fresher link, need "
+                    "cookies from your browser session, or be blocking automated "
+                    "requests."
+                )
 
             # Handle anti-hotlink redirects: use original URL instead of
             # the redirected one (e.g. homepage) for the actual download
@@ -133,6 +313,18 @@ class DownloadEngine:
                 if not filename:
                     filename = info.get("filename", "download")
 
+            # A name taken from a signed/tokenized URL can be hundreds of
+            # characters of noise. Prefer the server's own filename
+            # (Content-Disposition) when it's sane, else fall back to a plain
+            # "download" — the extension is added from content_type below.
+            if looks_like_junk_filename(filename):
+                server_name = info.get("filename") or ""
+                if server_name and not looks_like_junk_filename(server_name) and "." in server_name:
+                    filename = server_name
+                else:
+                    filename = "download"
+            filename = sanitize_filename(filename)
+
             # Ensure filename has a proper extension based on content_type
             # if the filename has no extension or is just "download"
             content_type = info.get("content_type", "")
@@ -144,12 +336,26 @@ class DownloadEngine:
                 if ext:
                     filename = f"{filename}{ext}"
                     logger.info(f"Added extension from content_type: {filename}")
+            filename = sanitize_filename(filename)
+
+            # Sort into a folder by file type, like IDM. An explicit save_path
+            # (e.g. chosen in the Add URL dialog) always wins; otherwise the
+            # folder comes from the file's category. This is decided from the
+            # FINAL filename, so a download whose real name only becomes known
+            # from the server (Content-Disposition) still lands in the right
+            # folder.
+            category = detect_category(filename)
+            resolved_save_path = save_path or self.resolve_category_dir(category)
+            logger.info(
+                f"Save folder for '{filename}': category={category.value}, "
+                f"explicit_save_path={save_path!r}, chosen={resolved_save_path}"
+            )
 
             # Create the download task
             task = DownloadTask(
                 url=download_url,
                 filename=filename,
-                save_path=save_path or self.default_save_dir,
+                save_path=resolved_save_path,
                 total_size=info["total_size"],
                 supports_range=info["supports_range"],
                 etag=info.get("etag"),
@@ -161,8 +367,7 @@ class DownloadEngine:
                 num_segments=num_segments,
             )
 
-            # Auto-detect category
-            task.category = detect_category(task.filename)
+            task.category = category
 
             # Step 2: Create segments
             if task.supports_range and task.total_size > 0:
@@ -291,7 +496,7 @@ class DownloadEngine:
                     if segment.status == SegmentStatus.DONE:
                         continue  # Skip already-completed segments (resume)
                     seg_task = asyncio.create_task(
-                        self._download_segment(
+                        self._segment_worker(
                             client, task, segment,
                             cancel_event, pause_event, on_progress
                         )
@@ -314,7 +519,6 @@ class DownloadEngine:
                         # Remove all segments except the first one
                         task.segments = [task.segments[0]]
                         task.segments[0].end_byte = task.total_size - 1 if task.total_size else 0
-                        task.segments[0].total_bytes = task.total_size if task.total_size else 0
                         
                         # Reset the first segment's downloaded_bytes to 0 and clear its temp file
                         task.segments[0].downloaded_bytes = 0
@@ -374,7 +578,23 @@ class DownloadEngine:
                     logger.info(f"Moved temp file to: {output_path}")
                 except Exception as e:
                     logger.error(f"Failed to move file: {e}")
-                    success = False
+                    # The download itself is finished — don't discard it over a
+                    # name the filesystem won't accept. Retry once with a short,
+                    # safe name in the same folder.
+                    ext = os.path.splitext(task.filename)[1]
+                    if len(ext) > 12:
+                        ext = ""
+                    safe_path = str(Path(task.save_path) / f"download_{str(task.id)[:8]}{ext}")
+                    if Path(safe_path).exists():
+                        safe_path = assembler._get_unique_path(safe_path)
+                    try:
+                        shutil.move(seg.temp_file, safe_path)
+                        task.filename = Path(safe_path).name
+                        success = True
+                        logger.warning(f"Saved under a safe fallback name instead: {safe_path}")
+                    except Exception as e2:
+                        logger.error(f"Fallback move also failed: {e2}")
+                        success = False
             else:
                 success = assembler.assemble(task.segments)
                 if success:
@@ -407,6 +627,68 @@ class DownloadEngine:
             self._cleanup_tracking(task.id)
             if on_progress:
                 on_progress(task)
+
+    async def _segment_worker(
+        self,
+        client: HttpClient,
+        task: DownloadTask,
+        initial_segment: Segment,
+        cancel_event: asyncio.Event,
+        pause_event: asyncio.Event,
+        on_progress: Optional[Callable],
+    ):
+        """Worker that downloads a segment and then dynamically steals work by splitting other segments."""
+        current_segment = initial_segment
+        MIN_SPLIT_SIZE = 1024 * 1024  # 1MB minimum to split
+        
+        while True:
+            # 1. Download assigned segment
+            await self._download_segment(
+                client, task, current_segment, cancel_event, pause_event, on_progress
+            )
+            
+            # 2. Check for cancel/error
+            if cancel_event.is_set() or task.status == DownloadStatus.ERROR:
+                break
+                
+            # 3. Dynamic Splitting: Find largest remaining segment
+            max_remaining = 0
+            largest_active = None
+            
+            for s in task.segments:
+                if s.status == SegmentStatus.ACTIVE:
+                    remaining = s.total_bytes - s.downloaded_bytes
+                    if remaining > max_remaining:
+                        max_remaining = remaining
+                        largest_active = s
+                        
+            # 4. Split if large enough
+            if largest_active and max_remaining > MIN_SPLIT_SIZE:
+                half_remaining = max_remaining // 2
+                new_start = largest_active.current_offset + half_remaining
+                new_end = largest_active.end_byte
+                
+                # Shrink old segment boundaries dynamically
+                largest_active.end_byte = new_start - 1
+                
+                # Create and append new segment
+                import uuid
+                new_id = f"{task.id}_seg_{uuid.uuid4().hex[:8]}"
+                from udm.core.segment import Segment, SegmentStatus
+                
+                new_segment = Segment(
+                    id=new_id,
+                    start_byte=new_start,
+                    end_byte=new_end,
+                    temp_file=str(Path(self.temp_dir) / new_id)
+                )
+                task.segments.append(new_segment)
+                logger.info(f"Dynamically split segment {largest_active.id}. New segment: {new_id} ({half_remaining} bytes)")
+                
+                current_segment = new_segment
+            else:
+                # No more profitable work to steal
+                break
 
     async def _download_segment(
         self,
@@ -494,6 +776,13 @@ class DownloadEngine:
         except Exception as e:
             if isinstance(e, RangeNotSupportedError):
                 raise
+            if isinstance(e, PlaceholderContentError):
+                # Permanent failure — the link isn't going to start returning
+                # real data on a retry, so don't waste time/bandwidth trying.
+                segment.status = SegmentStatus.ERROR
+                task.error_message = str(e)
+                logger.error(f"Segment {segment.id} got placeholder content, aborting: {e}")
+                return
             segment.error_count += 1
             if segment.can_retry:
                 segment.status = SegmentStatus.PENDING
@@ -507,6 +796,7 @@ class DownloadEngine:
                 )
             else:
                 segment.status = SegmentStatus.ERROR
+                task.error_message = str(e)
                 logger.error(
                     f"Segment {segment.id} failed after {segment.error_count} attempts: {e}"
                 )
@@ -583,6 +873,11 @@ class DownloadEngine:
             logger.info(f"Full file download complete: {task.filename} ({segment.downloaded_bytes} bytes)")
 
         except Exception as e:
+            if isinstance(e, PlaceholderContentError):
+                segment.status = SegmentStatus.ERROR
+                task.error_message = str(e)
+                logger.error(f"Full download got placeholder content, aborting: {e}")
+                return
             segment.error_count += 1
             if segment.can_retry:
                 segment.status = SegmentStatus.PENDING
@@ -593,6 +888,7 @@ class DownloadEngine:
                 )
             else:
                 segment.status = SegmentStatus.ERROR
+                task.error_message = str(e)
                 logger.error(f"Full download failed after {segment.error_count} attempts: {e}")
 
     def _update_task_stats(self, task: DownloadTask):

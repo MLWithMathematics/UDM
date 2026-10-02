@@ -41,14 +41,33 @@ class FileCategory(Enum):
     IMAGES = "Images"
 
 
-# File extension to category mapping
+# File extension to category mapping (each extension belongs to exactly one
+# category). Anything not listed falls into General.
 CATEGORY_MAP = {
-    FileCategory.COMPRESSED: {".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz", ".iso"},
-    FileCategory.DOCUMENTS: {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt", ".csv", ".odt"},
-    FileCategory.MUSIC: {".mp3", ".wav", ".flac", ".aac", ".ogg", ".wma", ".m4a"},
-    FileCategory.VIDEO: {".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v", ".3gp"},
-    FileCategory.PROGRAMS: {".exe", ".msi", ".dmg", ".deb", ".rpm", ".apk", ".appx"},
-    FileCategory.IMAGES: {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".svg", ".webp", ".ico", ".tiff"},
+    FileCategory.COMPRESSED: {
+        ".zip", ".rar", ".7z", ".tar", ".gz", ".tgz", ".bz2", ".tbz2", ".xz", ".txz",
+        ".zst", ".lz", ".lzma", ".cab", ".iso", ".img",
+    },
+    FileCategory.DOCUMENTS: {
+        ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt", ".csv",
+        ".odt", ".ods", ".odp", ".rtf", ".md", ".epub", ".mobi", ".azw3", ".djvu", ".xps",
+    },
+    FileCategory.MUSIC: {
+        ".mp3", ".wav", ".flac", ".aac", ".ogg", ".oga", ".opus", ".wma", ".m4a",
+        ".aiff", ".ape", ".amr", ".mid", ".midi",
+    },
+    FileCategory.VIDEO: {
+        ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v", ".3gp",
+        ".mpg", ".mpeg", ".ogv", ".vob", ".mts", ".m2ts",
+    },
+    FileCategory.PROGRAMS: {
+        ".exe", ".msi", ".msix", ".appx", ".appxbundle", ".dmg", ".pkg", ".deb",
+        ".rpm", ".apk", ".appimage",
+    },
+    FileCategory.IMAGES: {
+        ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".svg", ".webp", ".ico", ".tiff",
+        ".tif", ".heic", ".heif", ".avif", ".psd", ".ai", ".eps", ".raw", ".cr2", ".nef",
+    },
 }
 
 

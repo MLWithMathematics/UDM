@@ -15,21 +15,20 @@ from PyQt6.QtWidgets import (
     QScrollArea, QWidget, QFrame, QSizePolicy, QLineEdit,
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QFont, QColor, QPainter, QLinearGradient, QPen, QBrush
+from PyQt6.QtGui import QFont, QColor, QPainter, QPainterPath, QLinearGradient, QPen, QBrush
 
 from udm.core.segment import (
     DownloadTask, DownloadStatus, SegmentStatus,
     format_size, format_speed, format_eta,
 )
 
-
-# Colors for segment status
+# Colors for segment status (Fluent Design)
 SEG_COLORS = {
-    SegmentStatus.DONE:    ("#4CAF50", "#388E3C"),   # Green
-    SegmentStatus.ACTIVE:  ("#42A5F5", "#1E88E5"),   # Blue
-    SegmentStatus.PENDING: ("#BDBDBD", "#9E9E9E"),   # Gray
-    SegmentStatus.PAUSED:  ("#FFB74D", "#FF9800"),    # Orange
-    SegmentStatus.ERROR:   ("#EF5350", "#E53935"),    # Red
+    SegmentStatus.DONE:    QColor(0, 120, 212),      # Fluent Blue
+    SegmentStatus.ACTIVE:  QColor(100, 180, 250),    # Light Blue
+    SegmentStatus.PENDING: QColor(220, 220, 220),    # Gray
+    SegmentStatus.PAUSED:  QColor(255, 170, 0),      # Orange
+    SegmentStatus.ERROR:   QColor(232, 17, 35),      # Red
 }
 
 
@@ -43,8 +42,8 @@ class SegmentBar(QWidget):
         self._status = SegmentStatus.PENDING
         self._downloaded = 0
         self._total = 0
-        self.setMinimumHeight(22)
-        self.setMaximumHeight(22)
+        self.setMinimumHeight(24)
+        self.setMaximumHeight(24)
 
     def update_data(self, progress: float, status: SegmentStatus,
                     downloaded: int, total: int):
@@ -60,25 +59,29 @@ class SegmentBar(QWidget):
 
         w = self.width()
         h = self.height()
-        radius = 4
+        radius = h / 2.0  # Perfect pill shape
 
-        # Background
-        painter.setPen(QPen(QColor(187, 222, 251, 120), 1))
-        painter.setBrush(QBrush(QColor(240, 240, 240, 100)))
+        # Background container
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor(0, 0, 0, 15)))
         painter.drawRoundedRect(0, 0, w, h, radius, radius)
 
         # Fill
         fill_w = w * (self._progress / 100.0) if self._progress > 0 else 0
         if fill_w > 0:
-            colors = SEG_COLORS.get(self._status, SEG_COLORS[SegmentStatus.PENDING])
-            gradient = QLinearGradient(0, 0, 0, h)
-            gradient.setColorAt(0, QColor(colors[0]))
-            gradient.setColorAt(1, QColor(colors[1]))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QBrush(gradient))
-            painter.drawRoundedRect(0, 0, int(fill_w), h, radius, radius)
+            color = SEG_COLORS.get(self._status, SEG_COLORS[SegmentStatus.PENDING])
+            
+            # Clip path so the fill exactly matches the pill shape of the container
+            clip_path = QPainterPath()
+            clip_path.addRoundedRect(0, 0, w, h, radius, radius)
+            painter.setClipPath(clip_path)
 
-        # Text
+            painter.setBrush(QBrush(color))
+            painter.drawRect(0, 0, int(fill_w), h)
+            
+            painter.setClipping(False)
+
+        # Status text
         text = f"Seg {self.segment_id + 1}: {self._progress:.1f}%"
         if self._status == SegmentStatus.DONE:
             text = f"Seg {self.segment_id + 1}: ✅ Done"
@@ -87,17 +90,37 @@ class SegmentBar(QWidget):
         elif self._status == SegmentStatus.PAUSED:
             text = f"Seg {self.segment_id + 1}: ⏸ Paused"
 
-        painter.setPen(QColor(26, 58, 92) if self._progress < 60 else QColor(255, 255, 255))
-        painter.setFont(QFont("Segoe UI", 9, QFont.Weight.DemiBold))
-        painter.drawText(8, 0, w - 16, h, Qt.AlignmentFlag.AlignVCenter, text)
+        painter.setFont(QFont("Segoe UI Variable", 9, QFont.Weight.DemiBold))
+        
+        # Draw dark text as base
+        painter.setPen(QColor(26, 26, 26))
+        painter.drawText(12, 0, w - 24, h, Qt.AlignmentFlag.AlignVCenter, text)
+        
+        # Draw white text where the fill covers it
+        if fill_w > 12:
+            clip_path_fill = QPainterPath()
+            clip_path_fill.addRect(0, 0, fill_w, h)
+            painter.setClipPath(clip_path_fill)
+            painter.setPen(QColor(255, 255, 255))
+            painter.drawText(12, 0, w - 24, h, Qt.AlignmentFlag.AlignVCenter, text)
+            painter.setClipping(False)
 
-        # Size on right
+        # Right Text (Size / Total)
         size_text = f"{format_size(self._downloaded)} / {format_size(self._total)}"
-        painter.setPen(QColor(100, 100, 100) if self._progress < 60 else QColor(230, 230, 230))
-        painter.setFont(QFont("Segoe UI", 8))
-        painter.drawText(0, 0, w - 10, h,
-                         Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
-                         size_text)
+        painter.setFont(QFont("Segoe UI Variable", 8))
+        
+        # Base dark text for right side
+        painter.setPen(QColor(100, 100, 100))
+        painter.drawText(0, 0, w - 16, h, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight, size_text)
+        
+        # White text where the fill covers it
+        if fill_w > w - 100:
+            clip_path_fill2 = QPainterPath()
+            clip_path_fill2.addRect(0, 0, fill_w, h)
+            painter.setClipPath(clip_path_fill2)
+            painter.setPen(QColor(240, 240, 240))
+            painter.drawText(0, 0, w - 16, h, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight, size_text)
+            painter.setClipping(False)
 
         painter.end()
 
@@ -129,12 +152,13 @@ class DownloadDetailDialog(QDialog):
         self.setModal(False)  # Non-modal so user can interact with main window
 
         self._setup_ui()
-        self._update_ui()
 
         # Auto-refresh timer
         self._refresh_timer = QTimer()
         self._refresh_timer.timeout.connect(self._update_ui)
         self._refresh_timer.start(500)  # Refresh every 500ms
+
+        self._update_ui()
 
     def set_task(self, task: DownloadTask):
         """Update the task reference (called from main window on progress)."""
@@ -206,9 +230,24 @@ class DownloadDetailDialog(QDialog):
         progress_layout = QVBoxLayout(progress_group)
 
         self.overall_progress = QProgressBar()
-        self.overall_progress.setMinimumHeight(28)
+        self.overall_progress.setMinimumHeight(24)
         self.overall_progress.setTextVisible(True)
-        self.overall_progress.setFormat("0.0%")
+        self.overall_progress.setFormat(" %p% ")
+        self.overall_progress.setStyleSheet("""
+            QProgressBar {
+                background-color: rgba(0, 0, 0, 0.05);
+                border: none;
+                border-radius: 12px;
+                text-align: center;
+                color: #1a1a1a;
+                font-family: "Segoe UI Variable", "Segoe UI", sans-serif;
+                font-weight: 600;
+            }
+            QProgressBar::chunk {
+                background-color: #0078d4;
+                border-radius: 12px;
+            }
+        """)
         progress_layout.addWidget(self.overall_progress)
 
         # Stats row

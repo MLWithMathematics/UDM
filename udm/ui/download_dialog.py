@@ -10,6 +10,8 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont
 
+from pathlib import Path
+
 from udm.core.segment import FileCategory
 
 
@@ -19,13 +21,21 @@ class DownloadDialog(QDialog):
     download_requested = pyqtSignal(dict)  # Emits download config dict
 
     def __init__(self, parent=None, url: str = "", filename: str = "", save_dir: str = "",
-                 cookies: str = "", referrer: str = "", user_agent: str = ""):
+                 cookies: str = "", referrer: str = "", user_agent: str = "",
+                 category_dirs: dict = None):
         super().__init__(parent)
         self.setWindowTitle("Add New Download")
         self.setMinimumWidth(560)
         self.setModal(True)
 
         self._save_dir = save_dir
+        # Per-category folders (the "categories" section of config.json), so
+        # this dialog and the download engine always agree on where each file
+        # type goes. Loaded from the config file if the caller didn't pass them.
+        self._category_dirs = category_dirs if category_dirs is not None else self._load_category_dirs()
+        # Becomes True once the user picks a folder with Browse — from then on
+        # their choice is respected and changing the category won't move it.
+        self._custom_dir = False
         self.cookies = cookies
         self.referrer = referrer
         self.user_agent = user_agent
@@ -61,6 +71,7 @@ class DownloadDialog(QDialog):
         self.filename_input = QLineEdit()
         self.filename_input.setPlaceholderText("Auto-detected from URL")
         self.filename_input.setText(filename)
+        self.filename_input.textChanged.connect(self._on_filename_changed)
         details_layout.addRow("File Name:", self.filename_input)
 
         # Save location
@@ -80,9 +91,14 @@ class DownloadDialog(QDialog):
         self.category_combo = QComboBox()
         for cat in FileCategory:
             self.category_combo.addItem(cat.value)
+        self.category_combo.currentTextChanged.connect(self._on_category_changed)
         details_layout.addRow("Category:", self.category_combo)
 
         layout.addWidget(details_group)
+        
+        # Initial categorization
+        self._on_filename_changed(self.filename_input.text())
+        self._on_category_changed(self.category_combo.currentText())
 
         # Download Settings
         settings_group = QGroupBox("Download Settings")
@@ -134,6 +150,37 @@ class DownloadDialog(QDialog):
             except Exception:
                 pass
 
+    def _on_filename_changed(self, text: str):
+        if text:
+            from udm.core.segment import detect_category
+            cat = detect_category(text)
+            self.category_combo.setCurrentText(cat.value)
+
+    @staticmethod
+    def _load_category_dirs() -> dict:
+        try:
+            from udm.storage.config import Config
+            return dict(Config().get("categories", {}) or {})
+        except Exception:
+            return {}
+
+    def _folder_for_category(self, category_text: str) -> str:
+        folder = self._category_dirs.get(category_text)
+        if folder:
+            return str(folder)
+        if not self._save_dir:
+            return ""
+        if category_text == "General":
+            return self._save_dir
+        return str(Path(self._save_dir) / category_text)
+
+    def _on_category_changed(self, category_text: str):
+        if self._custom_dir:
+            return
+        folder = self._folder_for_category(category_text)
+        if folder:
+            self.save_path_input.setText(folder)
+
     def _browse_save_dir(self):
         """Open directory picker."""
         directory = QFileDialog.getExistingDirectory(
@@ -142,6 +189,7 @@ class DownloadDialog(QDialog):
         if directory:
             self.save_path_input.setText(directory)
             self._save_dir = directory
+            self._custom_dir = True
 
     def _on_download(self):
         """Validate and emit download request."""

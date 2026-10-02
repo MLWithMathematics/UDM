@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLabel, QLineEdit, QPushButton, QComboBox,
     QSpinBox, QCheckBox, QGroupBox, QTabWidget,
-    QWidget, QFileDialog,
+    QWidget, QFileDialog, QApplication, QMessageBox,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont
@@ -105,7 +105,52 @@ class SettingsDialog(QDialog):
         )
         layout.addRow("Auto-start Downloads:", self.auto_start)
 
+        # --- Browser extension pairing token ---
+        token_group = QGroupBox("Browser Extension")
+        token_layout = QVBoxLayout(token_group)
+
+        token_hint = QLabel(
+            "Paste this token into the UDM extension's popup so it can "
+            "talk to this app. Without it, downloads from the browser "
+            "will be rejected."
+        )
+        token_hint.setWordWrap(True)
+        token_layout.addWidget(token_hint)
+
+        token_row = QHBoxLayout()
+        self.token_display = QLineEdit(self.config.get("security.pairing_token", ""))
+        self.token_display.setReadOnly(True)
+        token_row.addWidget(self.token_display)
+
+        copy_btn = QPushButton("Copy")
+        copy_btn.setMaximumWidth(70)
+        copy_btn.clicked.connect(self._copy_token)
+        token_row.addWidget(copy_btn)
+
+        regen_btn = QPushButton("Regenerate")
+        regen_btn.setMaximumWidth(100)
+        regen_btn.clicked.connect(self._regenerate_token)
+        token_row.addWidget(regen_btn)
+
+        token_layout.addLayout(token_row)
+        layout.addRow(token_group)
+
         return widget
+
+    def _copy_token(self):
+        QApplication.clipboard().setText(self.token_display.text())
+
+    def _regenerate_token(self):
+        reply = QMessageBox.question(
+            self,
+            "Regenerate Pairing Token",
+            "This invalidates the current token — you'll need to paste the "
+            "new one into the extension popup again. Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            new_token = self.config.regenerate_pairing_token()
+            self.token_display.setText(new_token)
 
     def _create_download_tab(self) -> QWidget:
         widget = QWidget()

@@ -5,7 +5,7 @@ UDM is a powerful, modern, and open-source download manager built with Python an
 ## ✨ Features
 
 - **⚡ Accelerated Downloads:** Multi-connection/multi-segment downloading to maximize your bandwidth.
-- **🎬 Video Downloading:** Built-in `yt-dlp` integration allows you to easily download videos from hundreds of supported sites. (**Not completed yet Working on it**)
+- **🎬 Video Downloading:** Built-in `yt-dlp` integration allows you to easily download videos from hundreds of supported sites. 
 - **🌐 Browser Extension:** Comes with a companion browser extension that communicates directly with UDM via WebSockets to catch your downloads instantly.
 - **📋 Clipboard Monitor:** Automatically detects downloadable URLs copied to your clipboard.
 - **⏱️ Download Scheduling:** Schedule your downloads to start when you are away or during off-peak hours.
@@ -79,7 +79,16 @@ The compiled executable will be available in the `dist/UDM/` directory, and the 
 
 ## Version 1
 
-There A Version Without Browser Extension Check it From [UDM_App V1.zip](<UDM_App V1.zip>)
+There A Version Without Browser Extension Check it From Software Builds/UDM_App V1.zip
+
+## Version 2
+its contains basic extension not support video Downloading from Youtube. It just download Files with help of extension. Software Builds/UDM_App V2 with Extension.zip
+
+## Version 3
+
+Final Version With all the Features Check it From software Builds/UDM_App V3.zip
+
+
 
 
 ## 🤝 Contributing

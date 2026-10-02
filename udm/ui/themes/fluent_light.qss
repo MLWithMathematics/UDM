@@ -1,0 +1,141 @@
+/* Fluent Light Minimalist Theme */
+
+QMainWindow {
+    background-color: #f3f3f3;
+}
+
+QWidget {
+    font-family: "Segoe UI Variable", "Segoe UI", "Inter", sans-serif;
+    color: #1a1a1a;
+}
+
+QToolBar {
+    background-color: transparent;
+    border: none;
+    spacing: 8px;
+    padding: 8px;
+}
+
+QToolButton {
+    background-color: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 6px 12px;
+    color: #1a1a1a;
+    font-weight: 500;
+}
+
+QToolButton:hover {
+    background-color: rgba(0, 0, 0, 0.04);
+}
+
+QToolButton:pressed {
+    background-color: rgba(0, 0, 0, 0.08);
+}
+
+QSplitter::handle {
+    background-color: transparent;
+}
+
+/* Sidebar List */
+QListWidget {
+    background-color: transparent;
+    border: none;
+    outline: none;
+}
+
+QListWidget::item {
+    padding: 10px 12px;
+    border-radius: 6px;
+    margin: 2px 8px;
+}
+
+QListWidget::item:hover {
+    background-color: rgba(0, 0, 0, 0.04);
+}
+
+QListWidget::item:selected {
+    background-color: #ffffff;
+    color: #0078d4;
+    font-weight: bold;
+    border: 1px solid rgba(0, 0, 0, 0.05);
+}
+
+/* Main Table */
+QTableWidget {
+    background-color: #ffffff;
+    border: 1px solid rgba(0, 0, 0, 0.05);
+    border-radius: 8px;
+    outline: none;
+    gridline-color: transparent;
+}
+
+QTableWidget::item {
+    padding: 4px;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.03);
+}
+
+QTableWidget::item:hover {
+    background-color: rgba(0, 0, 0, 0.02);
+}
+
+QTableWidget::item:selected {
+    background-color: rgba(0, 120, 212, 0.08);
+    color: #1a1a1a;
+}
+
+QHeaderView::section {
+    background-color: #ffffff;
+    border: none;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+    padding: 8px;
+    font-weight: 600;
+    color: #555555;
+    text-align: left;
+}
+
+/* Status Bar */
+QStatusBar {
+    background-color: transparent;
+    border-top: 1px solid rgba(0, 0, 0, 0.05);
+    color: #555555;
+}
+
+QStatusBar QLabel {
+    padding: 0 8px;
+}
+
+/* Menus */
+QMenu {
+    background-color: #ffffff;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    border-radius: 6px;
+    padding: 4px;
+}
+
+QMenu::item {
+    padding: 6px 24px 6px 12px;
+    border-radius: 4px;
+}
+
+QMenu::item:selected {
+    background-color: rgba(0, 0, 0, 0.04);
+}
+
+/* Group Boxes (Cards) */
+QGroupBox {
+    background-color: #ffffff;
+    border: 1px solid rgba(0, 0, 0, 0.05);
+    border-radius: 8px;
+    margin-top: 16px;
+    padding-top: 12px;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    padding: 0 4px;
+    color: #0d47a1;
+    font-weight: bold;
+    left: 10px;
+}

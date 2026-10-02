@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
     QToolBar, QStatusBar, QLabel, QListWidget, QListWidgetItem,
     QSplitter, QMenu, QMessageBox, QApplication,
     QAbstractItemView, QFrame, QInputDialog, QLineEdit,
+    QGraphicsDropShadowEffect,
 )
 from PyQt6.QtCore import (
     Qt, QTimer, pyqtSignal, pyqtSlot, QSize,
@@ -122,8 +123,8 @@ class MainWindow(QMainWindow):
             self.move(x, y)
 
     def _setup_theme(self):
-        """Load and apply the sky blue theme stylesheet."""
-        theme_path = Path(__file__).parent / "themes" / "skyblue.qss"
+        """Load and apply the fluent light theme stylesheet."""
+        theme_path = Path(__file__).parent / "themes" / "fluent_light.qss"
         if theme_path.exists():
             with open(theme_path, "r", encoding="utf-8") as f:
                 self.setStyleSheet(f.read())
@@ -259,7 +260,7 @@ class MainWindow(QMainWindow):
         self.table.setSelectionMode(
             QAbstractItemView.SelectionMode.SingleSelection
         )
-        self.table.setAlternatingRowColors(True)
+        self.table.setAlternatingRowColors(False)
         self.table.verticalHeader().setVisible(False)
         self.table.setShowGrid(False)
         self.table.setSortingEnabled(True)
@@ -285,6 +286,14 @@ class MainWindow(QMainWindow):
 
         # Row height
         self.table.verticalHeader().setDefaultSectionSize(44)
+        
+        # Add drop shadow to the table for depth
+        shadow = QGraphicsDropShadowEffect()
+        shadow.setBlurRadius(20)
+        shadow.setXOffset(0)
+        shadow.setYOffset(4)
+        shadow.setColor(QColor(0, 0, 0, 15))
+        self.table.setGraphicsEffect(shadow)
 
         content_layout.addWidget(self.table, stretch=3)
 

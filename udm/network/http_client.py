@@ -26,10 +26,26 @@ MAX_REDIRECTS = 10
 CONNECT_TIMEOUT = 30
 READ_TIMEOUT = 60
 
+# Below this, a response whose Content-Type looks like HTML/JSON when we
+# expected binary data is almost certainly an error/interstitial page, not
+# a legitimately tiny download.
+PLACEHOLDER_SIZE_THRESHOLD = 65536  # 64 KB
+
 
 class RangeNotSupportedError(aiohttp.ClientError):
     """Raised when a server returns 200 OK instead of 206 Partial Content for a range request."""
     pass
+
+
+class PlaceholderContentError(aiohttp.ClientError):
+    """
+    Raised when the server hands back a small HTML/JSON/error page instead of
+    the actual file — the exact failure mode that used to be silently accepted
+    as a "successfully completed" few-KB download (expired signed URL,
+    session-bound CDN link, bot/anti-leech block, etc.).
+    """
+    pass
+
 
 class HttpClient:
     """
@@ -82,23 +98,9 @@ class HttpClient:
 
     @staticmethod
     def _is_redirect_to_different_page(original_url: str, final_url: str) -> bool:
-        """
-        Detect if the server redirected us away from the expected resource.
-        Common anti-hotlinking behaviour: redirect direct links to homepage.
-        """
-        orig = urlparse(original_url)
-        final = urlparse(final_url)
-
-        # Redirected to root / or a generic page while original had a longer path
-        orig_path = orig.path.rstrip("/")
-        final_path = final.path.rstrip("/")
-        if orig_path and (not final_path or final_path == ""):
-            return True
-
-        # Original had a file extension, final doesn't (e.g. /file.mp3 → /)
-        if "." in orig_path.split("/")[-1] and "." not in final_path.split("/")[-1]:
-            return True
-
+        # We rely solely on Content-Type checking (`_looks_like_html`) to detect 
+        # anti-hotlinking. CDNs frequently drop file extensions or change domains,
+        # so URL-based heuristics block legitimate file downloads.
         return False
 
     @staticmethod
@@ -106,6 +108,23 @@ class HttpClient:
         """Check if content type indicates an HTML page rather than a file."""
         ct = content_type.lower().split(";")[0].strip()
         return ct in ("text/html", "application/xhtml+xml")
+
+    @staticmethod
+    def _looks_like_placeholder(content_type: str) -> bool:
+        """
+        Broader check than `_looks_like_html`: also catches JSON error bodies
+        and plain text, which several CDNs use for "link expired"/"forbidden"
+        responses instead of HTML.
+        """
+        ct = content_type.lower().split(";")[0].strip()
+        return ct in (
+            "text/html",
+            "application/xhtml+xml",
+            "application/json",
+            "text/plain",
+            "text/xml",
+            "application/xml",
+        )
 
     @staticmethod
     def _url_has_media_extension(url: str) -> bool:
@@ -132,7 +151,7 @@ class HttpClient:
         Send HEAD request to get file metadata.
         Includes anti-hotlink bypass: auto-derives Referer, detects redirects,
         and retries with GET if the server returned HTML for a media URL.
-        
+
         Returns dict with:
             - total_size: int (file size in bytes, 0 if unknown)
             - supports_range: bool
@@ -143,6 +162,8 @@ class HttpClient:
             - final_url: str (after redirects)
             - redirected: bool (True if server redirected to a different page)
             - original_url: str (the URL before any redirects)
+            - likely_placeholder: bool (True if we still think this is an
+              error/interstitial page even after retrying)
         """
         # Auto-derive Referer from URL origin if none provided
         if not referrer:
@@ -153,35 +174,40 @@ class HttpClient:
         # Detect anti-hotlink redirect: server sent us to homepage/HTML page
         redirected = self._is_redirect_to_different_page(url, info["final_url"])
         got_html = self._looks_like_html(info.get("content_type", ""))
-        expects_media = self._url_has_media_extension(url)
 
-        if (redirected or got_html) and expects_media:
+        # NOTE: this used to only fire when `_url_has_media_extension(url)`
+        # was True. That let a huge class of real download links through
+        # unchecked — signed CDN URLs, query-string-only links, and video
+        # stream URLs (.m3u8 isn't even in the "media extension" list) don't
+        # carry a recognizable extension, so a bogus small Content-Length
+        # from a redirect/error page was silently trusted as the real file
+        # size. Now we always double-check, regardless of extension.
+        if redirected or got_html:
             logger.warning(
-                f"Anti-hotlink detected: original={url}, "
+                f"Anti-hotlink/placeholder response suspected: original={url}, "
                 f"final={info['final_url']}, content_type={info.get('content_type')}"
             )
-            # Retry with GET probe (some servers only respond to GET with Referer)
             retry_info = await self._fallback_get_info(url, referrer)
             retry_redirected = self._is_redirect_to_different_page(url, retry_info["final_url"])
             retry_html = self._looks_like_html(retry_info.get("content_type", ""))
 
             if not retry_html and not retry_redirected:
-                # GET probe succeeded — use this info
                 logger.info("GET probe bypassed anti-hotlink protection")
                 info = retry_info
                 redirected = False
             else:
-                # Still blocked — keep original URL so user can fix referrer/cookies
                 logger.warning(
-                    "Anti-hotlink bypass failed. The download will use the original "
-                    "URL but may need manual Referer/cookies."
+                    "Server keeps returning a placeholder page for this URL. "
+                    "The download will likely need updated cookies/Referer, or "
+                    "this may be a streaming link that needs a dedicated extractor."
                 )
-                # Preserve the original URL, not the redirected one
                 info["final_url"] = url
                 redirected = True
+                info["likely_placeholder"] = True
 
         info["redirected"] = redirected
         info["original_url"] = url
+        info.setdefault("likely_placeholder", False)
         return info
 
     async def _head_probe(
@@ -392,7 +418,7 @@ class HttpClient:
         """
         Download a specific byte range of a file.
         Yields chunks of data as they arrive.
-        
+
         Uses Range header and optionally If-Range for resume safety.
         """
         session = await self._get_session()
@@ -431,6 +457,21 @@ class HttpClient:
             else:
                 response.raise_for_status()
 
+            # Guard against servers that respond 206/200 with a placeholder
+            # body (expired/session-bound signed URL, bot-block page) instead
+            # of real binary data. This is what let truncated "successful"
+            # downloads slip through before: the probe said "N bytes", the
+            # actual transfer delivered a tiny error page instead, and
+            # nothing ever compared the two.
+            resp_ct = response.headers.get("Content-Type", "")
+            expected_bytes = end_byte - start_byte + 1
+            if self._looks_like_placeholder(resp_ct) and expected_bytes > PLACEHOLDER_SIZE_THRESHOLD and self._url_has_media_extension(url):
+                raise PlaceholderContentError(
+                    f"Server returned '{resp_ct or 'unknown'}' content instead of binary "
+                    f"data for a {expected_bytes}-byte range request. The link is likely "
+                    f"expired, session-bound, or blocked."
+                )
+
             async for chunk in response.content.iter_chunked(chunk_size):
                 yield chunk
 
@@ -457,6 +498,14 @@ class HttpClient:
             proxy=self.proxy,
         ) as response:
             response.raise_for_status()
+
+            resp_ct = response.headers.get("Content-Type", "")
+            if self._looks_like_placeholder(resp_ct) and self._url_has_media_extension(url):
+                raise PlaceholderContentError(
+                    f"Server returned '{resp_ct or 'unknown'}' content instead of the "
+                    f"expected file. The link is likely expired, session-bound, or blocked."
+                )
+
             async for chunk in response.content.iter_chunked(chunk_size):
                 yield chunk
 

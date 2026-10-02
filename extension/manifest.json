@@ -1,12 +1,13 @@
 {
   "manifest_version": 3,
   "name": "UDM - Send to Download Manager",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Send downloads to UDM automatically or via right-click context menu",
   "permissions": [
     "contextMenus",
     "activeTab",
     "downloads",
+    "downloads.ui",
     "cookies",
     "storage",
     "webRequest"
