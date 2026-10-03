@@ -12,6 +12,14 @@ datas = [(os.path.join(ROOT, 'udm', 'ui', 'themes'), 'udm/ui/themes')]
 binaries = []
 hiddenimports = []
 
+# The logo: embedded as the .exe's file icon (EXE(icon=...) below) AND shipped
+# inside the bundle so the running app uses it for its window and tray icon.
+icon_path = os.path.join(ROOT, 'udm.ico')
+if os.path.exists(icon_path):
+    datas.append((icon_path, '.'))
+else:
+    print('[UDM.spec] WARNING: udm.ico not found - the exe will have no custom icon')
+
 
 def _collect(pkg):
     """Bundle a package completely (code, data files, native libs)."""
@@ -48,8 +56,6 @@ for tool in ('ffmpeg.exe', 'ffprobe.exe', 'deno.exe'):
         binaries.append((path, '.'))
     else:
         print(f"[UDM.spec] WARNING: vendor/{tool} not found - not bundled")
-
-icon_path = os.path.join(ROOT, 'udm.ico')
 
 a = Analysis(
     [os.path.join(ROOT, 'run.py')],

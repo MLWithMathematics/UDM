@@ -4,24 +4,86 @@
  * Adds a right-click context menu item "Download with UDM"
  * and sends the URL to the UDM desktop app via WebSocket.
  *
- * TIER 1 HARDENING (this revision):
- *  - Every message to UDM carries a pairing token (set in the popup),
- *    checked against the token UDM generated in ~/.udm/config.json.
- *    Without this, any local webpage could open a WebSocket to
- *    ws://localhost:19615 itself and silently trigger downloads.
- *  - We no longer cancel/erase the browser's own download until UDM
- *    has actually confirmed success. Previously `onDeterminingFilename`
- *    erased every download unconditionally, racing ahead of the more
- *    careful logic in `onCreated` — if UDM wasn't running, or the
- *    request failed, the file was just gone. Now there is exactly one
- *    place that decides to cancel/erase: after a confirmed "ok" from UDM.
+ * - Every message to UDM carries a pairing token (set in the popup),
+ *   checked against the token UDM generated in ~/.udm/config.json.
+ * - We never cancel/erase the browser's own download until UDM has actually
+ *   confirmed success. There is exactly one place that decides: the
+ *   `handedToUdm` / `handedBackToChrome` helpers below.
+ *
+ * LATENCY / "browser flash" HARDENING (this revision):
+ *  - Chrome's download UI is hidden SYNCHRONOUSLY the moment this service
+ *    worker starts (and on browser startup), instead of after an async
+ *    storage read. The old order meant the first download after a browser
+ *    restart or a cold service-worker wake could flash Chrome's own bubble.
+ *  - Chrome's filename determination (the step that can pop the OS
+ *    "Save As" dialog) is held back for intercepted downloads until UDM has
+ *    answered, with a hard cap so a download can never hang.
+ *  - If the in-page UDM dialog can't be shown because the content script
+ *    isn't loaded in that tab (page opened before the extension was
+ *    installed/reloaded), it is injected on demand instead of silently
+ *    falling back to UDM's desktop dialog.
+ *  - Pairing token and preferences are cached in memory, removing storage
+ *    round trips from the hot path.
  */
 
 const UDM_WS_URL = "ws://localhost:19615";
 const DEFAULT_TIMEOUT_MS = 4000;   // plain file downloads (HEAD probe + queue add)
 const VIDEO_TIMEOUT_MS = 30000;    // video resolution via yt-dlp can be slow
 
-// Create context menu on install
+// How long Chrome's filename determination (and with it any Save-As dialog)
+// may be held while we wait for UDM. Must stay well below the 30 s idle limit
+// of an MV3 service worker.
+const FILENAME_HOLD_MS = 8000;
+
+// ---------------------------------------------------------------------------
+// Preferences / token cache (kept in memory so the hot path never waits on
+// chrome.storage; refreshed at startup and whenever storage changes)
+// ---------------------------------------------------------------------------
+let hideNativeUiPref = true;   // default: hide Chrome's own download UI
+let autoConfirmPref = null;    // null = not loaded yet
+let tokenCache = null;         // null = not loaded yet
+
+chrome.storage.local.get(["udmHideNativeUi", "udmAutoConfirm", "udmToken"], (result) => {
+  hideNativeUiPref = result.udmHideNativeUi !== false;
+  autoConfirmPref = !!result.udmAutoConfirm;
+  tokenCache = result.udmToken || "";
+  applyNativeUi();
+});
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== "local") return;
+  if (changes.udmHideNativeUi) {
+    hideNativeUiPref = changes.udmHideNativeUi.newValue !== false;
+    applyNativeUi();
+  }
+  if (changes.udmAutoConfirm) autoConfirmPref = !!changes.udmAutoConfirm.newValue;
+  if (changes.udmToken) tokenCache = changes.udmToken.newValue || "";
+});
+
+/** Read the pairing token the user saved via the popup. */
+function getToken() {
+  if (tokenCache !== null) return Promise.resolve(tokenCache);
+  return new Promise((resolve) => {
+    chrome.storage.local.get(["udmToken"], (result) => {
+      tokenCache = result.udmToken || "";
+      resolve(tokenCache);
+    });
+  });
+}
+
+function getAutoConfirm() {
+  if (autoConfirmPref !== null) return Promise.resolve(autoConfirmPref);
+  return new Promise((resolve) => {
+    chrome.storage.local.get(["udmAutoConfirm"], (result) => {
+      autoConfirmPref = !!result.udmAutoConfirm;
+      resolve(autoConfirmPref);
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Context menu
+// ---------------------------------------------------------------------------
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.create({
     id: "udm-download-link",
@@ -35,10 +97,14 @@ chrome.runtime.onInstalled.addListener(() => {
     contexts: ["page"],
   });
 
+  applyNativeUi();
   console.log("UDM extension installed");
 });
 
-// Handle context menu clicks
+chrome.runtime.onStartup.addListener(() => {
+  applyNativeUi();
+});
+
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   let url = "";
   let referrer = "";
@@ -62,14 +128,9 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   }
 });
 
-/** Read the pairing token the user saved via the popup. */
-function getToken() {
-  return new Promise((resolve) => {
-    chrome.storage.local.get(["udmToken"], (result) => {
-      resolve(result.udmToken || "");
-    });
-  });
-}
+// ---------------------------------------------------------------------------
+// WebSocket request/response to UDM
+// ---------------------------------------------------------------------------
 
 /**
  * Send a request to UDM via WebSocket and wait for its real response
@@ -140,10 +201,23 @@ function extractFilename(url) {
   }
 }
 
-// Downloads we've already handed off to UDM (so we don't double-handle them).
-const interceptedDownloads = new Set();
+/** Cookie header string for a URL ("" if unavailable). */
+async function collectCookies(url) {
+  try {
+    // Use `url`, not `domain` — domain-scoped lookups miss cookies set on a
+    // parent domain (common on CDN subdomains) that the browser would still
+    // send for this exact request URL.
+    const cookies = await chrome.cookies.getAll({ url });
+    return cookies.map((c) => `${c.name}=${c.value}`).join("; ");
+  } catch (e) {
+    console.log("Could not get cookies:", e);
+    return "";
+  }
+}
 
-// --- Hiding Chrome's own download popup -----------------------------------
+// ---------------------------------------------------------------------------
+// Chrome's own download UI
+// ---------------------------------------------------------------------------
 // Chrome shows its download bubble the instant a download is created —
 // before any extension code gets a chance to run — so racing it is
 // impossible. The supported fix is chrome.downloads.setUiOptions (needs the
@@ -152,29 +226,25 @@ const interceptedDownloads = new Set();
 // Chrome (UDM unreachable, you pressed Cancel, a blob: download...), so
 // nothing Chrome is genuinely downloading ever becomes invisible.
 // Can be turned off from the extension popup.
-let hideNativeUiPref = true;
 const nativeFallbackIds = new Set();
 
-function applyNativeUi() {
+async function applyNativeUi() {
   if (!chrome.downloads.setUiOptions) return; // Chrome < 105
   const enabled = !hideNativeUiPref || nativeFallbackIds.size > 0;
   try {
-    const result = chrome.downloads.setUiOptions({ enabled });
-    if (result && result.catch) {
-      result.catch((e) => console.log("setUiOptions:", e && e.message));
-    }
+    await chrome.downloads.setUiOptions({ enabled });
   } catch (e) {
-    console.log("setUiOptions failed:", e);
+    console.log("setUiOptions failed:", e && e.message);
   }
 }
 
-function letChromeHandle(downloadId) {
+async function letChromeHandle(downloadId) {
   nativeFallbackIds.add(downloadId);
-  applyNativeUi();
+  await applyNativeUi();
 }
 
-function resumeNatively(downloadId) {
-  letChromeHandle(downloadId);
+async function resumeNatively(downloadId) {
+  await letChromeHandle(downloadId);
   chrome.downloads.resume(downloadId);
 }
 
@@ -186,34 +256,80 @@ chrome.downloads.onChanged.addListener((delta) => {
   }
 });
 
-chrome.storage.local.get(["udmHideNativeUi"], (result) => {
-  hideNativeUiPref = result.udmHideNativeUi !== false;
-  applyNativeUi();
-});
+// Hide the UI right now, synchronously at service-worker start-up, using the
+// default. The stored preference (loaded above) corrects it a moment later if
+// the user turned hiding off.
+applyNativeUi();
 
-chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === "local" && changes.udmHideNativeUi) {
-    hideNativeUiPref = changes.udmHideNativeUi.newValue !== false;
-    applyNativeUi();
+// ---------------------------------------------------------------------------
+// Holding Chrome's filename determination (prevents the "Save As" flash)
+// ---------------------------------------------------------------------------
+// downloadId -> { promise, release }
+const filenameGates = new Map();
+
+function holdFilenameDetermination(downloadId) {
+  let release;
+  const promise = new Promise((resolve) => (release = resolve));
+  filenameGates.set(downloadId, { promise, release });
+}
+
+function releaseFilenameHold(downloadId) {
+  const gate = filenameGates.get(downloadId);
+  if (!gate) return;
+  gate.release();
+  setTimeout(() => filenameGates.delete(downloadId), 60000);
+}
+
+// Fires before Chrome would show its own Save-As dialog. For downloads we are
+// about to intercept (onCreated opened a gate), wait for UDM's answer — but
+// never longer than FILENAME_HOLD_MS. Everything else proceeds immediately.
+chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
+  const gate = filenameGates.get(downloadItem.id);
+  if (!gate) {
+    suggest();
+    return;
   }
+
+  let called = false;
+  const proceed = () => {
+    if (called) return;
+    called = true;
+    clearTimeout(timer);
+    try { suggest(); } catch (e) {}
+  };
+  const timer = setTimeout(proceed, FILENAME_HOLD_MS);
+  gate.promise.then(proceed);
+  return true; // we will call suggest() asynchronously
 });
 
+// ---------------------------------------------------------------------------
+// Settling an intercepted download — the ONLY two exits
+// ---------------------------------------------------------------------------
+// Downloads we've already handed off to UDM (so we don't double-handle them).
+const interceptedDownloads = new Set();
 
-// Handle messages from content script
+/** UDM confirmed it has the download: remove Chrome's copy. */
+function handedToUdm(downloadId) {
+  interceptedDownloads.add(downloadId);
+  chrome.downloads.cancel(downloadId);
+  chrome.downloads.erase({ id: downloadId });
+  releaseFilenameHold(downloadId);
+}
+
+/** UDM couldn't take it (or the user chose Cancel): let Chrome finish it. */
+async function handedBackToChrome(downloadId) {
+  await resumeNatively(downloadId); // UI is re-enabled first, then resume
+  releaseFilenameHold(downloadId);
+}
+
+// ---------------------------------------------------------------------------
+// Messages from the content script
+// ---------------------------------------------------------------------------
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
     if (msg.type === "trigger_download") {
       try {
-        let cookieString = "";
-        try {
-          // Use `url`, not `domain` — domain-scoped lookups miss cookies set
-          // on a parent domain (common on CDN subdomains) that the browser
-          // would still send for this exact request URL.
-          const cookies = await chrome.cookies.getAll({ url: msg.url });
-          cookieString = cookies.map((c) => `${c.name}=${c.value}`).join("; ");
-        } catch (e) {
-          console.log("Could not get cookies:", e);
-        }
+        const cookieString = await collectCookies(msg.url);
 
         const { success } = await sendToUDM({
           type: "download",
@@ -226,30 +342,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         });
 
         if (success && msg.downloadId) {
-          interceptedDownloads.add(msg.downloadId);
-          chrome.downloads.cancel(msg.downloadId);
-          chrome.downloads.erase({ id: msg.downloadId });
+          handedToUdm(msg.downloadId);
         } else if (msg.downloadId) {
           // UDM failed or is unreachable — let Chrome finish it natively
           // rather than losing the file.
-          resumeNatively(msg.downloadId);
+          handedBackToChrome(msg.downloadId);
         }
       } catch (e) {
         console.error("Error triggering download:", e);
-        if (msg.downloadId) resumeNatively(msg.downloadId);
+        if (msg.downloadId) handedBackToChrome(msg.downloadId);
       }
     } else if (msg.type === "cancel_download") {
       if (msg.downloadId) {
-        resumeNatively(msg.downloadId);
+        handedBackToChrome(msg.downloadId);
       }
     } else if (msg.type === "trigger_video_download") {
-      let cookieString = "";
-      try {
-        const cookies = await chrome.cookies.getAll({ url: msg.url });
-        cookieString = cookies.map((c) => `${c.name}=${c.value}`).join("; ");
-      } catch (e) {
-        console.log("Could not get cookies for video:", e);
-      }
+      const cookieString = await collectCookies(msg.url);
 
       await sendToUDM(
         {
@@ -264,11 +372,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         VIDEO_TIMEOUT_MS
       );
     } else if (msg.type === "get_video_formats") {
-      let cookieString = "";
-      try {
-        const cookies = await chrome.cookies.getAll({ url: msg.url });
-        cookieString = cookies.map((c) => `${c.name}=${c.value}`).join("; ");
-      } catch (e) {}
+      const cookieString = await collectCookies(msg.url);
 
       const result = await sendToUDM(
         {
@@ -290,157 +394,127 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return true; // keep the message channel open for the async work above
 });
 
-// Fires before Chrome would show its own Save-As dialog. We no longer
-// cancel/erase here (that used to race with `onCreated` below and could
-// discard downloads if UDM wasn't running) — we just let filename
-// resolution proceed normally. The actual take-over decision happens
-// exclusively in `onCreated`.
-chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
-  suggest();
-});
-
+// ---------------------------------------------------------------------------
+// Automatic download interception
+// ---------------------------------------------------------------------------
 const EXTENSION_START_TIME = new Date(Date.now() - 5000); // 5 second buffer
 
-function getAutoConfirm() {
-  return new Promise((resolve) => {
-    chrome.storage.local.get(["udmAutoConfirm"], (result) => {
-      resolve(!!result.udmAutoConfirm);
-    });
-  });
+/**
+ * Show the in-page "UDM Download" dialog in a tab. If the content script
+ * isn't there (tab opened before the extension was installed/reloaded),
+ * inject it and try again. Resolves true if the dialog was shown.
+ */
+async function showDialogInTab(tabId, payload) {
+  try {
+    await chrome.tabs.sendMessage(tabId, payload);
+    return true;
+  } catch (e) {
+    // No listener in that tab — fall through and inject.
+  }
+
+  try {
+    await chrome.scripting.insertCSS({ target: { tabId }, files: ["content.css"] });
+    await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
+    await chrome.tabs.sendMessage(tabId, payload);
+    return true;
+  } catch (e) {
+    console.log("Could not show in-page dialog:", e && e.message);
+    return false;
+  }
 }
 
-// Automatically intercept file downloads — this is the single authoritative
-// interception path.
+// This is the single authoritative interception path.
 chrome.downloads.onCreated.addListener(async (downloadItem) => {
+  const id = downloadItem.id;
+
   const itemStartTime = new Date(downloadItem.startTime);
   if (itemStartTime < EXTENSION_START_TIME) {
     console.log("Ignoring old download from browser startup:", downloadItem.url);
-    if (downloadItem.state === "in_progress") letChromeHandle(downloadItem.id);
+    if (downloadItem.state === "in_progress") letChromeHandle(id);
     return;
   }
 
   if (
     downloadItem.state !== "in_progress" ||
-    interceptedDownloads.has(downloadItem.id) ||
+    interceptedDownloads.has(id) ||
     downloadItem.url.startsWith("blob:") ||
     downloadItem.url.startsWith("data:")
   ) {
-    if (downloadItem.state === "in_progress" && !interceptedDownloads.has(downloadItem.id)) {
-      letChromeHandle(downloadItem.id);
+    if (downloadItem.state === "in_progress" && !interceptedDownloads.has(id)) {
+      letChromeHandle(id);
     }
     return;
   }
 
   console.log("Caught download:", downloadItem.url);
 
-  // Pause first thing, synchronously — already as fast as the API allows.
-  // Nothing below can make Chrome's own "download started" indicator not
-  // have appeared; only the OS Save-As dialog (a separate Chrome setting,
-  // chrome://settings/downloads → "Ask where to save each file") can be
-  // avoided entirely, and only by turning that setting off — no extension
-  // API can suppress it, since it's shown before onCreated even fires.
-  chrome.downloads.pause(downloadItem.id);
+  // Pause first thing, synchronously — as fast as the API allows — and open
+  // the filename gate so Chrome doesn't pop a Save-As dialog while UDM is
+  // deciding. Chrome's own bubble is already hidden (see applyNativeUi).
+  chrome.downloads.pause(id);
+  holdFilenameDetermination(id);
 
-  const autoConfirm = await getAutoConfirm();
-  if (autoConfirm) {
-    // Skip the confirm-dialog round trip entirely — straight to UDM. This
-    // removes two message hops (background → content script → background)
-    // and the wait for a human click, so the window where Chrome's own UI
-    // is visible is as short as it can be: bounded only by the WebSocket
-    // round trip to UDM instead of also including dialog + reaction time.
-    let cookieString = "";
-    try {
-      const cookies = await chrome.cookies.getAll({
-        url: downloadItem.finalUrl || downloadItem.url,
+  const url = downloadItem.finalUrl || downloadItem.url;
+  const filename = downloadItem.filename || extractFilename(url);
+
+  try {
+    if (await getAutoConfirm()) {
+      // Skip the confirm dialog entirely — straight to UDM.
+      const cookies = await collectCookies(url);
+      const { success } = await sendToUDM({
+        type: "download",
+        url,
+        filename,
+        referrer: downloadItem.referrer || "",
+        cookies,
+        user_agent: navigator.userAgent,
+        auto_start: true,
       });
-      cookieString = cookies.map((c) => `${c.name}=${c.value}`).join("; ");
-    } catch (e) {}
+      if (success) handedToUdm(id);
+      else handedBackToChrome(id);
+      return;
+    }
 
+    // Ask in the page. The dialog's buttons settle the download through
+    // "trigger_download" / "cancel_download" above.
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const tabUrl = tab && tab.url ? tab.url : "";
+    const pageOk = tab && tab.id != null && /^https?:/i.test(tabUrl);
+
+    if (pageOk) {
+      const shown = await showDialogInTab(tab.id, {
+        type: "show_download_dialog",
+        url,
+        filename,
+        downloadId: id,
+      });
+      if (shown) return;
+    }
+
+    // No page can host the dialog (chrome:// page, PDF viewer, new tab...):
+    // let UDM's desktop app show its own Add Download dialog.
+    const cookies = await collectCookies(url);
     const { success } = await sendToUDM({
       type: "download",
-      url: downloadItem.finalUrl || downloadItem.url,
-      filename:
-        downloadItem.filename ||
-        extractFilename(downloadItem.finalUrl || downloadItem.url),
-      referrer: downloadItem.referrer || "",
-      cookies: cookieString,
+      url,
+      filename,
+      referrer: pageOk ? tabUrl : downloadItem.referrer || "",
+      cookies,
       user_agent: navigator.userAgent,
-      auto_start: true,
+      auto_start: false,
     });
-    if (success) {
-      interceptedDownloads.add(downloadItem.id);
-      chrome.downloads.cancel(downloadItem.id);
-      chrome.downloads.erase({ id: downloadItem.id });
-    } else {
-      resumeNatively(downloadItem.id);
-    }
-    return;
+    if (success) handedToUdm(id);
+    else handedBackToChrome(id);
+  } catch (e) {
+    console.error("Interception failed:", e);
+    handedBackToChrome(id);
   }
-
-  chrome.tabs.query({ active: true, currentWindow: true }, function (tabs) {
-    if (tabs.length > 0 && tabs[0].url && !tabs[0].url.startsWith("chrome://")) {
-      chrome.tabs.sendMessage(
-        tabs[0].id,
-        {
-          type: "show_download_dialog",
-          url: downloadItem.finalUrl || downloadItem.url,
-          filename:
-            downloadItem.filename ||
-            extractFilename(downloadItem.finalUrl || downloadItem.url),
-          downloadId: downloadItem.id,
-        },
-        async (response) => {
-          if (chrome.runtime.lastError) {
-            // Content script not loaded on this page — fall back to
-            // sending straight to UDM, and honor the real result.
-            const { success } = await sendToUDM({
-              type: "download",
-              url: downloadItem.finalUrl || downloadItem.url,
-              filename:
-                downloadItem.filename ||
-                extractFilename(downloadItem.finalUrl || downloadItem.url),
-              referrer: tabs[0].url,
-              cookies: "",
-              user_agent: navigator.userAgent,
-              auto_start: false,
-            });
-            if (success) {
-              interceptedDownloads.add(downloadItem.id);
-              chrome.downloads.cancel(downloadItem.id);
-              chrome.downloads.erase({ id: downloadItem.id });
-            } else {
-              resumeNatively(downloadItem.id);
-            }
-          }
-        }
-      );
-    } else {
-      (async () => {
-        const { success } = await sendToUDM({
-          type: "download",
-          url: downloadItem.finalUrl || downloadItem.url,
-          filename:
-            downloadItem.filename ||
-            extractFilename(downloadItem.finalUrl || downloadItem.url),
-          referrer: "",
-          cookies: "",
-          user_agent: navigator.userAgent,
-          auto_start: false,
-        });
-        if (success) {
-          interceptedDownloads.add(downloadItem.id);
-          chrome.downloads.cancel(downloadItem.id);
-          chrome.downloads.erase({ id: downloadItem.id });
-        } else {
-          resumeNatively(downloadItem.id);
-        }
-      })();
-    }
-  });
 });
 
+// ---------------------------------------------------------------------------
 // Video Sniffer — flags likely video responses (non-YouTube included) so
 // content.js can show the floating "Download this video" button.
+// ---------------------------------------------------------------------------
 chrome.webRequest.onResponseStarted.addListener(
   (details) => {
     if (details.tabId === -1) return;

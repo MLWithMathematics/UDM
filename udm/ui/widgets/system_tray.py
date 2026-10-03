@@ -2,17 +2,38 @@
 System tray icon with context menu for UDM.
 """
 
+import sys
+from pathlib import Path
+
 from PyQt6.QtWidgets import QSystemTrayIcon, QMenu
 from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QLinearGradient, QFont
 from PyQt6.QtCore import pyqtSignal, QSize
 
 
-def create_udm_icon(px: int = 64) -> QIcon:
-    """Create the UDM app icon programmatically (sky blue download arrow).
+def _icon_file() -> Path:
+    """Location of udm.ico (inside the .exe bundle, or the project root)."""
+    if hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS) / "udm.ico"
+    return Path(__file__).resolve().parents[3] / "udm.ico"
 
-    `px` is the rendered pixel size; the drawing is defined on a 64-unit grid
-    and scaled, so larger sizes (e.g. 256 for the .exe icon) stay sharp.
+
+def create_udm_icon(px: int = 64, use_file: bool = True) -> QIcon:
+    """Return the UDM app icon.
+
+    Uses the real logo (udm.ico) when it is available; otherwise falls back to
+    a programmatically drawn icon (sky blue download arrow). `use_file=False`
+    forces the drawn version (used by tools/make_icon.py).
+
+    `px` is the rendered pixel size of the drawn fallback; it is defined on a
+    64-unit grid and scaled, so larger sizes stay sharp.
     """
+    if use_file:
+        path = _icon_file()
+        if path.exists():
+            icon = QIcon(str(path))
+            if not icon.isNull():
+                return icon
+
     size = 64
     pixmap = QPixmap(px, px)
     pixmap.fill(QColor(0, 0, 0, 0))

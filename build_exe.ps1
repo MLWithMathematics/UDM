@@ -61,8 +61,12 @@ if (-not (Test-Path "$vendor\deno.exe")) {
     }
 }
 
-# 3. Icon (non-fatal)
-if (-not (Test-Path "udm.ico")) {
+# 3. Icon: use the project's logo (udm.ico). It is never overwritten here;
+#    only if it is missing do we generate a plain fallback icon.
+if (Test-Path "udm.ico") {
+    Write-Host "==> Using logo icon: udm.ico"
+} else {
+    Write-Warning "udm.ico not found - generating a plain fallback icon. Put your logo icon at $PSScriptRoot\udm.ico to use it."
     try { Run $py @("tools\make_icon.py") } catch { Write-Warning "Icon generation skipped: $($_.Exception.Message)" }
 }
 

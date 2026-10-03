@@ -107,8 +107,10 @@ You can produce a standalone, single-file `UDM.exe` that has every feature of `p
 
 1. Creates `venv` (if missing) and installs `requirements.txt` plus the latest PyInstaller.
 2. Downloads `ffmpeg.exe`, `ffprobe.exe` and `deno.exe` into `vendor/` (skipped on later runs if already there).
-3. Generates `udm.ico` from the app's own icon.
+3. Uses the project logo `udm.ico` as the `.exe` icon and as the app's window/tray icon (it is bundled inside the `.exe`)
 4. Runs PyInstaller with `UDM.spec`, which bundles the themes, the full `yt-dlp` extractor set and the helper tools into one windowed `.exe`.
+
+To change the logo, replace `udm.ico` (a multi-size icon with 16, 32, 48, 64, 128 and 256 px) and rebuild. `udm_logo.jpg` is the source artwork.
 
 ### Build notes
 
