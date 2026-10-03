@@ -86,7 +86,7 @@ its contains basic extension not support video Downloading from Youtube. It just
 
 ## Version 3
 
-Final Version With all the Features Check it From software Builds/UDM_App V3.zip
+Final Version With all the Features Check it From software Builds/UDM_App V3.zip (**If you can't Run it from .exe, use Development setup for Updated UDM V3**)
 
 
 

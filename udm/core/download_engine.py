@@ -672,15 +672,14 @@ class DownloadEngine:
                 largest_active.end_byte = new_start - 1
                 
                 # Create and append new segment
-                import uuid
-                new_id = f"{task.id}_seg_{uuid.uuid4().hex[:8]}"
-                from udm.core.segment import Segment, SegmentStatus
+                new_id = len(task.segments)
                 
                 new_segment = Segment(
                     id=new_id,
+                    download_id=task.id,
                     start_byte=new_start,
                     end_byte=new_end,
-                    temp_file=str(Path(self.temp_dir) / new_id)
+                    temp_file=str(Path(self.temp_dir) / f"{task.id}.seg{new_id}.part")
                 )
                 task.segments.append(new_segment)
                 logger.info(f"Dynamically split segment {largest_active.id}. New segment: {new_id} ({half_remaining} bytes)")

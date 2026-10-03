@@ -123,11 +123,25 @@ class MainWindow(QMainWindow):
             self.move(x, y)
 
     def _setup_theme(self):
-        """Load and apply the fluent light theme stylesheet."""
-        theme_path = Path(__file__).parent / "themes" / "fluent_light.qss"
+        """Load and apply the theme stylesheet."""
+        import sys
+        from pathlib import Path
+        
+        # Get theme from config (default to fluent_light)
+        theme_name = self.config.get("theme", "fluent_light")
+        
+        # PyInstaller extracts datas to sys._MEIPASS
+        if hasattr(sys, "_MEIPASS"):
+            theme_path = Path(sys._MEIPASS) / "udm" / "ui" / "themes" / f"{theme_name}.qss"
+        else:
+            theme_path = Path(__file__).parent / "themes" / f"{theme_name}.qss"
+            
         if theme_path.exists():
             with open(theme_path, "r", encoding="utf-8") as f:
                 self.setStyleSheet(f.read())
+        else:
+            import logging
+            logging.getLogger("udm").warning(f"Theme file not found: {theme_path}")
 
     def _setup_toolbar(self):
         """Create the main toolbar with action buttons."""

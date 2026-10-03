@@ -43,55 +43,20 @@ class VideoGrabber:
     """
 
     def __init__(self):
-        self._yt_dlp_path = shutil.which("yt-dlp")
-        if not self._yt_dlp_path:
-            logger.warning("yt-dlp not found in PATH. Video grabber will be limited.")
+        try:
+            import yt_dlp
+            self._has_yt_dlp = True
+        except ImportError:
+            self._has_yt_dlp = False
+            logger.warning("yt_dlp module not found. Video grabber will be disabled.")
         self.last_error: str = ""
 
     @property
     def is_available(self) -> bool:
-        return self._yt_dlp_path is not None
-
-    def _common_args(
-        self,
-        referrer: Optional[str] = None,
-        cookies: Optional[str] = None,
-        user_agent: Optional[str] = None,
-    ) -> List[str]:
-        """
-        Shared flags for every yt-dlp invocation. Several sites (and plenty
-        of non-YouTube video hosts) refuse to serve anything to a bare
-        request without the same Referer/cookies/User-Agent the browser
-        used — these were previously never passed at all, so any site that
-        gates its video behind a session check failed silently.
-        """
-        args = ["--no-playlist", "--no-warnings"]
-        if referrer:
-            args += ["--referer", referrer]
-        if user_agent:
-            args += ["--user-agent", user_agent]
-        return args
+        return self._has_yt_dlp
 
     @staticmethod
     def _write_cookie_file(cookies: str, site_url: str) -> Optional[str]:
-        """
-        Write a proper Netscape-format cookie file for yt-dlp's --cookies
-        flag, scoped to the site's own domain.
-
-        We used to pass cookies via `--add-header "Cookie: ..."`, which
-        yt-dlp itself flags as a "potential security risk" — that header
-        gets attached to EVERY request yt-dlp makes for this run, including
-        ones to a completely different domain (e.g. googlevideo.com for a
-        youtube.com page). Sending youtube.com session cookies to
-        googlevideo.com — or an incomplete cookie set the site wasn't
-        expecting — can make the target think you're half-authenticated and
-        serve a degraded response (this is what produced the exact
-        "Requested format is not available" failure with zero formats: not
-        a real absence of formats, but YouTube reacting badly to a Cookie
-        header it doesn't recognize as a normal session).
-        A --cookies file properly scopes each cookie to a domain, so it's
-        only ever sent where a real browser would send it.
-        """
         if not cookies:
             return None
         try:
@@ -113,7 +78,6 @@ class VideoGrabber:
             name, value = name.strip(), value.strip()
             if not name:
                 continue
-            # domain / include_subdomains / path / secure / expiry / name / value
             lines.append(f"{domain}\tTRUE\t/\tTRUE\t{far_future}\t{name}\t{value}")
 
         if len(lines) <= 1:
@@ -133,36 +97,36 @@ class VideoGrabber:
     ) -> List[VideoFormat]:
         """
         Get available video formats for a URL.
-
         Returns list of VideoFormat objects sorted by quality.
         """
         if not self.is_available:
             logger.error("yt-dlp not installed")
             return []
 
+        import yt_dlp
         cookie_file = self._write_cookie_file(cookies, referrer or url) if cookies else None
+        
+        def _extract():
+            ydl_opts = {
+                "quiet": True,
+                "no_warnings": True,
+                "noplaylist": True,
+                "nocheckcertificate": True,
+            }
+            if referrer:
+                ydl_opts["referer"] = referrer
+            if user_agent:
+                ydl_opts["http_headers"] = {"User-Agent": user_agent}
+            if cookie_file:
+                ydl_opts["cookiefile"] = cookie_file
+
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                return ydl.extract_info(url, download=False)
+
+        loop = asyncio.get_event_loop()
         try:
-            cookie_args = ["--cookies", cookie_file] if cookie_file else []
-            proc = await asyncio.create_subprocess_exec(
-                self._yt_dlp_path,
-                "--dump-json",
-                "--no-download",
-                *self._common_args(referrer, cookies, user_agent),
-                *cookie_args,
-                url,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await proc.communicate()
-
-            if proc.returncode != 0:
-                self.last_error = stderr.decode(errors="replace").strip()
-                logger.error(f"yt-dlp error: {self.last_error}")
-                return []
-
-            data = json.loads(stdout.decode())
+            data = await loop.run_in_executor(None, _extract)
             formats = []
-
             for fmt in data.get("formats", []):
                 vf = VideoFormat(
                     format_id=fmt.get("format_id", ""),
@@ -172,9 +136,7 @@ class VideoGrabber:
                     note=fmt.get("format_note", ""),
                 )
                 formats.append(vf)
-
             return formats
-
         except Exception as e:
             self.last_error = str(e)
             logger.error(f"Failed to get formats: {e}")
@@ -194,74 +156,37 @@ class VideoGrabber:
         cookies: Optional[str] = None,
         user_agent: Optional[str] = None,
     ) -> Optional[Dict]:
-        """
-        Resolve metadata (and, where possible, a direct download URL) for a
-        video. Returns None only when yt-dlp genuinely could not recognize
-        or reach the page at all — NOT when a flat "url" happens to be
-        missing.
-
-        A missing top-level "url" is normal and expected for most non-trivial
-        videos: whenever yt-dlp needs to merge separate video+audio streams
-        (which is how YouTube serves almost everything above 720p, and how
-        many other sites serve HLS/DASH), there is no single combined URL to
-        report here — that merge only happens during an actual
-        `download_video()` call. Callers should treat "we got info back" as
-        the success signal, not "info.get('url') is truthy".
-
-        Returns dict with:
-            - url: direct download URL if a single combined stream exists,
-              else the best single-stream URL we could find (informational
-              only — do not rely on this alone for a complete download)
-            - filename: suggested filename
-            - filesize: approximate size in bytes
-            - ext: file extension
-            - title: video title
-        """
         if not self.is_available:
             self.last_error = "yt-dlp is not installed"
             return None
 
+        import yt_dlp
         cookie_file = self._write_cookie_file(cookies, referrer or url) if cookies else None
+        
+        def _extract():
+            ydl_opts = {
+                "quiet": True,
+                "no_warnings": True,
+                "noplaylist": True,
+                "nocheckcertificate": True,
+            }
+            if format_id != "best":
+                ydl_opts["format"] = format_id
+            if referrer:
+                ydl_opts["referer"] = referrer
+            if user_agent:
+                ydl_opts["http_headers"] = {"User-Agent": user_agent}
+            if cookie_file:
+                ydl_opts["cookiefile"] = cookie_file
+
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                return ydl.extract_info(url, download=False)
+
+        loop = asyncio.get_event_loop()
         try:
-            cookie_args = ["--cookies", cookie_file] if cookie_file else []
-            # "best" (yt-dlp's legacy single-combined-file selector) is what
-            # was actually causing "Requested format is not available" —
-            # modern YouTube mostly doesn't serve a single file with both
-            # video and audio anymore, so explicitly asking for one can
-            # genuinely match nothing. Omitting -f entirely lets yt-dlp use
-            # its own current default (bestvideo*+bestaudio/best as of this
-            # yt-dlp release), which is exactly what a bare `yt-dlp <url>`
-            # does — and that's confirmed working. Only pass -f when the
-            # caller wants a *specific* format id (e.g. from a format-picker
-            # UI), not for our generic "best available" case.
-            format_args = [] if format_id == "best" else ["-f", format_id]
-            proc = await asyncio.create_subprocess_exec(
-                self._yt_dlp_path,
-                "--dump-json",
-                "--no-download",
-                *format_args,
-                *self._common_args(referrer, cookies, user_agent),
-                *cookie_args,
-                url,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await proc.communicate()
-
-            if proc.returncode != 0:
-                self.last_error = stderr.decode(errors="replace").strip()
-                logger.error(f"yt-dlp error: {self.last_error}")
-                return None
-
-            data = json.loads(stdout.decode())
-
+            data = await loop.run_in_executor(None, _extract)
             direct_url = data.get("url", "")
             if not direct_url:
-                # Adaptive/merged selection (very common: YouTube >720p, most
-                # HLS/DASH sites) — grab the best available single-stream URL
-                # as informational metadata. The real download still goes
-                # through download_video(), which lets yt-dlp handle the
-                # merge properly.
                 requested = data.get("requested_formats") or []
                 if requested:
                     direct_url = requested[-1].get("url", "") or requested[0].get("url", "")
@@ -274,7 +199,6 @@ class VideoGrabber:
                 "title": data.get("title", ""),
                 "headers": data.get("http_headers", {}),
             }
-
         except Exception as e:
             self.last_error = str(e)
             logger.error(f"Failed to get direct URL: {e}")
@@ -293,37 +217,33 @@ class VideoGrabber:
         cookies: Optional[str] = None,
         user_agent: Optional[str] = None,
     ) -> List[Dict]:
-        """
-        List the video qualities that actually exist for this URL, highest
-        first, e.g. [{"quality": "1080", "label": "1080p", "size": 52428800}, ...].
-        `size` is an approximate video+audio total in bytes (0 if unknown).
-        Returns [] if the page can't be resolved (see self.last_error).
-        """
         if not self.is_available:
             self.last_error = "yt-dlp is not installed"
             return []
 
+        import yt_dlp
         cookie_file = self._write_cookie_file(cookies, referrer or url) if cookies else None
+        
+        def _extract():
+            ydl_opts = {
+                "quiet": True,
+                "no_warnings": True,
+                "noplaylist": True,
+                "nocheckcertificate": True,
+            }
+            if referrer:
+                ydl_opts["referer"] = referrer
+            if user_agent:
+                ydl_opts["http_headers"] = {"User-Agent": user_agent}
+            if cookie_file:
+                ydl_opts["cookiefile"] = cookie_file
+
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                return ydl.extract_info(url, download=False)
+
+        loop = asyncio.get_event_loop()
         try:
-            cookie_args = ["--cookies", cookie_file] if cookie_file else []
-            proc = await asyncio.create_subprocess_exec(
-                self._yt_dlp_path,
-                "--dump-json",
-                "--no-download",
-                *self._common_args(referrer, cookies, user_agent),
-                *cookie_args,
-                url,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await proc.communicate()
-
-            if proc.returncode != 0:
-                self.last_error = stderr.decode("utf-8", errors="replace").strip()
-                logger.error(f"yt-dlp error listing qualities: {self.last_error}")
-                return []
-
-            data = json.loads(stdout.decode("utf-8", errors="replace"))
+            data = await loop.run_in_executor(None, _extract)
         except Exception as e:
             self.last_error = str(e)
             logger.error(f"Failed to list qualities: {e}")
@@ -340,8 +260,6 @@ class VideoGrabber:
         def _size(f: dict) -> int:
             return int(f.get("filesize") or f.get("filesize_approx") or 0)
 
-        # Video-only streams still need an audio track merged in, so add the
-        # best audio stream's size to each height for a realistic total.
         audio_sizes = [
             _size(f) for f in formats
             if f.get("vcodec") == "none" and f.get("acodec") not in (None, "none")
@@ -376,23 +294,10 @@ class VideoGrabber:
         user_agent: Optional[str] = None,
         on_progress: Optional[callable] = None,
     ) -> Optional[str]:
-        """
-        Download video directly via yt-dlp (fallback for unsegmented downloads).
-        yt-dlp handles any required video+audio merge itself (requires ffmpeg
-        on PATH for formats that need it). Returns the actual output file path.
-        """
         if not self.is_available:
             self.last_error = "yt-dlp is not installed"
             return None
 
-        # Two separate subprocess-stdout-parsing bugs in a row (the final
-        # path, then --progress-template coming back unusable — a long-
-        # standing, documented yt-dlp quirk) is a sign that parsing yt-dlp's
-        # CLI text output is the wrong approach for this. yt-dlp's own
-        # Python API gives progress_hooks a real dict with guaranteed keys
-        # and types — no text, no formatting, no field-name guessing — and
-        # the final file path straight from its own return value instead of
-        # scraping stdout for it.
         import yt_dlp
 
         cookie_file = self._write_cookie_file(cookies, referrer or url) if cookies else None
@@ -404,12 +309,6 @@ class VideoGrabber:
             downloaded = d.get("downloaded_bytes") or 0
             total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
             speed = d.get("speed") or 0
-            # This hook runs on yt-dlp's own worker thread (we call it via
-            # run_in_executor below), never the main/Qt thread. Touching Qt
-            # objects from here directly would be unsafe; call_soon_threadsafe
-            # is the correct way to hand work back to the main event loop,
-            # which is what on_progress ultimately needs (it updates a Qt
-            # table row and possibly an open detail dialog).
             loop.call_soon_threadsafe(
                 on_progress,
                 {"downloaded_bytes": downloaded, "total_bytes": total, "speed": speed},
@@ -425,11 +324,6 @@ class VideoGrabber:
                 "noplaylist": True,
                 "progress_hooks": [_hook],
             }
-            # "best" was the actual cause of "Requested format is not
-            # available" on modern YouTube (a legacy single-combined-file
-            # selector most videos no longer have). Omitting "format"
-            # entirely lets yt-dlp use its own current smarter default,
-            # same as a bare `yt-dlp <url>` does.
             if format_id != "best":
                 ydl_opts["format"] = format_id
             if referrer:
@@ -459,8 +353,6 @@ class VideoGrabber:
             self.last_error = "yt-dlp returned no result"
             return None
 
-        # The definitive final path, straight from yt-dlp's own return
-        # value — not a guess, not scraped from stdout text.
         requested = info.get("requested_downloads") or []
         final_path = (
             (requested[0].get("filepath") if requested else None)

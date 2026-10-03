@@ -4,6 +4,7 @@ UDM — Ultimate Download Manager
 Launch script.
 """
 
+import yt_dlp
 from udm.app import main
 
 if __name__ == "__main__":
