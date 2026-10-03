@@ -7,14 +7,19 @@ from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QLinearGradient, QFont
 from PyQt6.QtCore import pyqtSignal, QSize
 
 
-def create_udm_icon() -> QIcon:
-    """Create the UDM app icon programmatically (sky blue download arrow)."""
+def create_udm_icon(px: int = 64) -> QIcon:
+    """Create the UDM app icon programmatically (sky blue download arrow).
+
+    `px` is the rendered pixel size; the drawing is defined on a 64-unit grid
+    and scaled, so larger sizes (e.g. 256 for the .exe icon) stay sharp.
+    """
     size = 64
-    pixmap = QPixmap(size, size)
+    pixmap = QPixmap(px, px)
     pixmap.fill(QColor(0, 0, 0, 0))
 
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.scale(px / size, px / size)
 
     # Background circle
     gradient = QLinearGradient(0, 0, size, size)

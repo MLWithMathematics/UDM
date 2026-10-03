@@ -456,13 +456,15 @@ def setup_logging():
     log_dir = Path.home() / ".udm" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
+    handlers = [logging.FileHandler(str(log_dir / "udm.log"), encoding="utf-8")]
+    # The windowed .exe has no console, so sys.stdout is None there.
+    if sys.stdout is not None:
+        handlers.insert(0, logging.StreamHandler(sys.stdout))
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        handlers=[
-            logging.StreamHandler(sys.stdout),
-            logging.FileHandler(str(log_dir / "udm.log"), encoding="utf-8"),
-        ],
+        handlers=handlers,
     )
 
 def check_single_instance(port: int = 19615, token: str = "") -> bool:
