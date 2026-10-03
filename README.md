@@ -147,7 +147,7 @@ The pairing token stops other local web pages from sending downloads to UDM.
 
 Ready-to-run builds are in the [`Software Builds`](Software%20Builds) folder. Open a file and click **Download** (or **Download raw file**).
 
-- **UDM V3.exe:** latest, all features including YouTube and other video sites. Just run it, no install needed.
+- **UDM V3.exe:** latest, all features including YouTube and other video sites. Just run it, no install needed. (**Download from releases**)
 - **UDM_App V2 with Extension.zip:** basic extension; downloads files only, no video support.
 - **UDM_App V1.zip:** no browser extension.
 
